@@ -5,12 +5,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -63,7 +63,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -80,12 +79,13 @@ enum class AppLanguage(val label: String, val locale: Locale, val tag: String) {
     HINDI("हिन्द", Locale("hi", "IN"), "hi-IN")
 }
 
+var activeWorkingModel: String? = null
+
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     private var speechRecognizer: SpeechRecognizer? = null
     private var textToSpeech: TextToSpeech? = null
     private var isTtsReady by mutableStateOf(false)
-    private var onTtsDoneCallback: (() -> Unit)? = null
     private lateinit var prefs: SharedPreferences
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -100,10 +100,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 context = this,
                 prefs = prefs,
                 speechRecognizer = speechRecognizer!!,
-                onSpeak = { text, lang, onDone ->
-                    onTtsDoneCallback = onDone
-                    speakOut(text, lang)
-                },
+                onSpeak = { text, lang -> speakOut(text, lang) },
                 onStopAll = {
                     speechRecognizer?.stopListening()
                     textToSpeech?.stop()
@@ -115,23 +112,11 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
             isTtsReady = true
-            textToSpeech?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) {}
-                override fun onDone(utteranceId: String?) {
-                    runOnUiThread { onTtsDoneCallback?.invoke() }
-                }
-                override fun onError(utteranceId: String?) {
-                    runOnUiThread { onTtsDoneCallback?.invoke() }
-                }
-            })
         }
     }
 
     private fun speakOut(text: String, language: AppLanguage) {
-        if (!isTtsReady) {
-            onTtsDoneCallback?.invoke()
-            return
-        }
+        if (!isTtsReady) return
         textToSpeech?.let { tts ->
             tts.language = language.locale
             tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "JARVIS_REPLY")
@@ -151,7 +136,7 @@ fun JarvisMainScreen(
     context: Context,
     prefs: SharedPreferences,
     speechRecognizer: SpeechRecognizer,
-    onSpeak: (String, AppLanguage, () -> Unit) -> Unit,
+    onSpeak: (String, AppLanguage) -> Unit,
     onStopAll: () -> Unit
 ) {
     var apiKey by remember { mutableStateOf(prefs.getString("gemini_api_key", "")?.trim() ?: "") }
@@ -161,62 +146,46 @@ fun JarvisMainScreen(
     var selectedLanguage by remember { mutableStateOf(AppLanguage.ENGLISH) }
     var isListening by remember { mutableStateOf(false) }
     var isThinking by remember { mutableStateOf(false) }
-    var isContinuousMode by remember { mutableStateOf(false) }
     var rmsLevel by remember { mutableFloatStateOf(0f) }
     var statusText by remember { mutableStateOf("TAP ORB TO COMMUNICATE") }
-    var subtitleText by remember { mutableStateOf("") }
+    var liveTranscription by remember { mutableStateOf("") }
 
     val coroutineScope = rememberCoroutineScope()
 
-    fun triggerListening() {
+    fun startVoiceSession() {
         if (apiKey.isEmpty()) {
             showKeyDialog = true
             statusText = "API KEY REQUIRED"
             return
         }
 
-        subtitleText = ""
-        statusText = "LISTENING..."
+        liveTranscription = ""
+        statusText = "I'M LISTENING... TAKE YOUR TIME"
         isListening = true
 
-        startListening(
+        startListeningQuietly(
             context = context,
             speechRecognizer = speechRecognizer,
             language = selectedLanguage,
             onStateChange = { listening -> isListening = listening },
             onRms = { rms -> rmsLevel = rms },
-            onResultText = { result ->
-                subtitleText = "\"$result\""
+            onPartial = { partial -> liveTranscription = "\"$partial\"" },
+            onFinalResult = { finalResult ->
+                liveTranscription = "\"$finalResult\""
                 statusText = "JARVIS IS THINKING..."
                 isThinking = true
                 isListening = false
 
                 coroutineScope.launch {
-                    val aiReply = queryGemini(result, apiKey, selectedLanguage)
+                    val aiReply = queryGeminiAutoDiscover(finalResult, apiKey, selectedLanguage)
                     isThinking = false
                     statusText = aiReply
-
-                    onSpeak(aiReply, selectedLanguage) {
-                        if (isContinuousMode) {
-                            coroutineScope.launch {
-                                delay(350)
-                                triggerListening()
-                            }
-                        } else {
-                            statusText = "STANDBY"
-                        }
-                    }
+                    onSpeak(aiReply, selectedLanguage)
                 }
             },
-            onErrorText = { err ->
-                statusText = err
+            onError = { errMsg ->
+                statusText = errMsg
                 isListening = false
-                if (isContinuousMode) {
-                    coroutineScope.launch {
-                        delay(1200)
-                        triggerListening()
-                    }
-                }
             }
         )
     }
@@ -225,8 +194,7 @@ fun JarvisMainScreen(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
-            isContinuousMode = true
-            triggerListening()
+            startVoiceSession()
         } else {
             statusText = "MICROPHONE PERMISSION NEEDED"
         }
@@ -237,7 +205,7 @@ fun JarvisMainScreen(
             .fillMaxSize()
             .background(Color(0xFF000000))
     ) {
-        // Top Bar: Language Pills + Key Settings
+        // Top Bar
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -251,7 +219,7 @@ fun JarvisMainScreen(
                     Box(
                         modifier = Modifier
                             .background(
-                                color = if (isSelected) Color(0xFF2B2B2B) else Color(0xFF111111),
+                                color = if (isSelected) Color(0xFF2A2A2A) else Color(0xFF111111),
                                 shape = RoundedCornerShape(16.dp)
                             )
                             .clickable {
@@ -273,7 +241,7 @@ fun JarvisMainScreen(
 
             Box(
                 modifier = Modifier
-                    .background(Color(0xFF181818), RoundedCornerShape(16.dp))
+                    .background(Color(0xFF1A1A1A), RoundedCornerShape(16.dp))
                     .clickable { showKeyDialog = true }
                     .padding(horizontal = 12.dp, vertical = 6.dp)
             ) {
@@ -286,7 +254,7 @@ fun JarvisMainScreen(
             }
         }
 
-        // Center: Glowing Living White Energy Orb
+        // Center: Glowing Smoky Orb
         Column(
             modifier = Modifier.align(Alignment.Center),
             horizontalAlignment = Alignment.CenterHorizontally
@@ -296,11 +264,10 @@ fun JarvisMainScreen(
                 isThinking = isThinking,
                 rmsLevel = rmsLevel,
                 onClick = {
-                    if (isListening || isContinuousMode) {
-                        isContinuousMode = false
+                    if (isListening) {
+                        speechRecognizer.stopListening()
                         isListening = false
-                        onStopAll()
-                        statusText = "PAUSED (TAP TO RESUME)"
+                        statusText = "PROCESSING..."
                     } else {
                         val hasMic = ContextCompat.checkSelfPermission(
                             context,
@@ -308,8 +275,7 @@ fun JarvisMainScreen(
                         ) == PackageManager.PERMISSION_GRANTED
 
                         if (hasMic) {
-                            isContinuousMode = true
-                            triggerListening()
+                            startVoiceSession()
                         } else {
                             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                         }
@@ -319,14 +285,14 @@ fun JarvisMainScreen(
 
             Spacer(modifier = Modifier.height(36.dp))
 
-            if (subtitleText.isNotEmpty()) {
+            if (liveTranscription.isNotEmpty()) {
                 Text(
-                    text = subtitleText,
+                    text = liveTranscription,
                     color = Color(0xFFAAAAAA),
-                    fontSize = 13.sp,
+                    fontSize = 14.sp,
                     fontFamily = FontFamily.Monospace,
                     textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(horizontal = 36.dp)
+                    modifier = Modifier.padding(horizontal = 32.dp)
                 )
                 Spacer(modifier = Modifier.height(10.dp))
             }
@@ -343,9 +309,9 @@ fun JarvisMainScreen(
         }
 
         Text(
-            text = if (isContinuousMode) "• HANDS-FREE LOOP ACTIVE •" else "TAP ORB TO START",
-            color = if (isContinuousMode) Color(0xFF00FF88) else Color(0xFF444444),
-            fontSize = 10.sp,
+            text = if (isListening) "MIC ACTIVE • TAP TO SEND EARLY" else "TAP ORB TO SPEAK",
+            color = if (isListening) Color(0xFF00FF88) else Color(0xFF444444),
+            fontSize = 11.sp,
             fontFamily = FontFamily.Monospace,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -358,25 +324,16 @@ fun JarvisMainScreen(
             onDismissRequest = { if (apiKey.isNotEmpty()) showKeyDialog = false },
             containerColor = Color(0xFF141414),
             title = {
-                Text(
-                    text = "Google Gemini API Key",
-                    color = Color.White,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 16.sp
-                )
+                Text("Google Gemini API Key", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 16.sp)
             },
             text = {
                 Column {
-                    Text(
-                        text = "Paste your Google AI Studio key below. It stays 100% private on your phone:",
-                        color = Color(0xFFAAAAAA),
-                        fontSize = 12.sp
-                    )
+                    Text("Paste your key below. Saved safely on your device:", color = Color(0xFFAAAAAA), fontSize = 12.sp)
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedTextField(
                         value = tempKeyInput,
                         onValueChange = { tempKeyInput = it.trim() },
-                        placeholder = { Text("Paste key starting with AQ... or AIza...", color = Color(0xFF555555), fontSize = 11.sp) },
+                        placeholder = { Text("AQ... or AIza...", color = Color(0xFF555555), fontSize = 12.sp) },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -388,6 +345,7 @@ fun JarvisMainScreen(
                         val cleaned = tempKeyInput.trim()
                         apiKey = cleaned
                         prefs.edit().putString("gemini_api_key", cleaned).apply()
+                        activeWorkingModel = null // Reset so it rediscovers
                         showKeyDialog = false
                         statusText = "KEY CONNECTED! TAP TO START"
                     },
@@ -420,7 +378,7 @@ fun JarvisEnergyOrb(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = if (isThinking) 2200 else 9000, easing = LinearEasing),
+            animation = tween(durationMillis = if (isThinking) 2000 else 9000, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "rotation"
@@ -430,7 +388,7 @@ fun JarvisEnergyOrb(
         initialValue = 360f,
         targetValue = 0f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = if (isThinking) 3200 else 13000, easing = LinearEasing),
+            animation = tween(durationMillis = if (isThinking) 3000 else 14000, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "counter_rotation"
@@ -463,7 +421,6 @@ fun JarvisEnergyOrb(
             val center = Offset(size.width / 2f, size.height / 2f)
             val baseRadius = (size.minDimension / 2.7f) * currentScale
 
-            // Bright ethereal primary smoke rings
             val filaments = 10
             for (i in 0 until filaments) {
                 val phase = (i * (360f / filaments) + (if (i % 2 == 0) rotationAngle else counterRotation)) % 360f
@@ -475,8 +432,7 @@ fun JarvisEnergyOrb(
                     center.y + (sin(radians) * offset).toFloat()
                 )
 
-                // High-visibility bright white filaments
-                val alpha = if (isListening) 0.85f else if (i % 2 == 0) 0.95f else 0.55f
+                val alpha = if (isListening) 0.95f else if (i % 2 == 0) 0.9f else 0.5f
                 drawCircle(
                     color = Color.White.copy(alpha = alpha),
                     center = filamentCenter,
@@ -485,7 +441,6 @@ fun JarvisEnergyOrb(
                 )
             }
 
-            // Central radiant glow
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(
@@ -503,26 +458,36 @@ fun JarvisEnergyOrb(
     }
 }
 
-suspend fun queryGemini(prompt: String, apiKey: String, language: AppLanguage): String = withContext(Dispatchers.IO) {
+suspend fun queryGeminiAutoDiscover(prompt: String, apiKey: String, language: AppLanguage): String = withContext(Dispatchers.IO) {
     val cleanKey = apiKey.trim()
-    val models = listOf(
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-2.5-flash-lite"
-    )
-
     val systemInstruction = when (language) {
         AppLanguage.ENGLISH -> "You are JARVIS, an intelligent, helpful personal AI. Answer concisely in 1 to 2 spoken sentences. Do not use asterisks or formatting."
         AppLanguage.NEPALI -> "तपाईं JARVIS हुनुहुन्छ। उत्तर १ वा २ वाक्यमा छोटो र प्रष्ट दिनुहोस्। नेपाली देवनागरी लिपिमा मात्र लेख्नुहोस्।"
         AppLanguage.HINDI -> "आप JARVIS हैं। उत्तर 1 या 2 वाक्यों में संक्षिप्त और स्पष्ट दें। हिन्दी देवनागरी लिपि में लिखें।"
     }
 
+    // Build list of models to try (auto-discovered from Google first!)
+    val candidateModels = mutableListOf<String>()
+    if (!activeWorkingModel.isNullOrEmpty()) {
+        candidateModels.add(activeWorkingModel!!)
+    } else {
+        val discovered = fetchAvailableModelsFromGoogle(cleanKey)
+        candidateModels.addAll(discovered)
+        // Solid fallbacks
+        candidateModels.addAll(listOf(
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-latest",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-exp",
+            "gemini-1.5-pro"
+        ))
+    }
+
     var lastErrorMessage = ""
 
-    for (model in models) {
+    for (rawModel in candidateModels.distinct()) {
+        val model = rawModel.removePrefix("models/")
         try {
-            // New AQ. Auth keys MUST use x-goog-api-key header on the clean URL
             val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
             val conn = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
@@ -560,12 +525,15 @@ suspend fun queryGemini(prompt: String, apiKey: String, language: AppLanguage): 
                     val parts = content?.optJSONArray("parts")
                     if (parts != null && parts.length() > 0) {
                         val text = parts.getJSONObject(0).optString("text", "")
-                        if (text.isNotEmpty()) return@withContext text.trim()
+                        if (text.isNotEmpty()) {
+                            activeWorkingModel = model // Successfully locked in!
+                            return@withContext text.trim()
+                        }
                     }
                 }
             } else {
                 val err = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
-                lastErrorMessage = "[$code]: ${if (err.contains("API_KEY_INVALID")) "Invalid API Key" else err.take(80)}"
+                lastErrorMessage = "[$code]: $err"
             }
         } catch (e: Exception) {
             lastErrorMessage = e.localizedMessage ?: "Network error"
@@ -575,50 +543,121 @@ suspend fun queryGemini(prompt: String, apiKey: String, language: AppLanguage): 
     return@withContext "Google Gemini Error: $lastErrorMessage"
 }
 
-fun startListening(
+fun fetchAvailableModelsFromGoogle(apiKey: String): List<String> {
+    val modelList = mutableListOf<String>()
+    try {
+        val url = URL("https://generativelanguage.googleapis.com/v1beta/models")
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            setRequestProperty("x-goog-api-key", apiKey)
+            connectTimeout = 6000
+            readTimeout = 6000
+        }
+        if (conn.responseCode == 200) {
+            val resp = conn.inputStream.bufferedReader().use { it.readText() }
+            val root = JSONObject(resp)
+            val modelsArray = root.optJSONArray("models")
+            if (modelsArray != null) {
+                for (i in 0 until modelsArray.length()) {
+                    val item = modelsArray.getJSONObject(i)
+                    val name = item.optString("name", "")
+                    val methods = item.optJSONArray("supportedGenerationMethods")
+                    var canGenerate = false
+                    if (methods != null) {
+                        for (j in 0 until methods.length()) {
+                            if (methods.optString(j) == "generateContent") canGenerate = true
+                        }
+                    }
+                    if (canGenerate) {
+                        if (name.contains("flash", ignoreCase = true)) {
+                            modelList.add(0, name) // Prioritize flash models at the top
+                        } else {
+                            modelList.add(name)
+                        }
+                    }
+                }
+            }
+        }
+    } catch (_: Exception) {}
+    return modelList
+}
+
+fun startListeningQuietly(
     context: Context,
     speechRecognizer: SpeechRecognizer,
     language: AppLanguage,
     onStateChange: (Boolean) -> Unit,
     onRms: (Float) -> Unit,
-    onResultText: (String) -> Unit,
-    onErrorText: (String) -> Unit
+    onPartial: (String) -> Unit,
+    onFinalResult: (String) -> Unit,
+    onError: (String) -> Unit
 ) {
     if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-        onErrorText("Speech recognition not available")
+        onError("Speech recognition not available")
         return
     }
+
+    val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+    try {
+        am?.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_MUTE, 0)
+    } catch (_: Exception) {}
 
     val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
         putExtra(RecognizerIntent.EXTRA_LANGUAGE, language.tag)
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, language.tag)
         putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, language.tag)
+        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 15000L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 6000L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 6000L)
     }
 
     speechRecognizer.setRecognitionListener(object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) { onStateChange(true) }
+        override fun onReadyForSpeech(params: Bundle?) {
+            onStateChange(true)
+            try {
+                am?.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_UNMUTE, 0)
+            } catch (_: Exception) {}
+        }
         override fun onBeginningOfSpeech() {}
         override fun onRmsChanged(rmsdB: Float) { onRms(rmsdB) }
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEndOfSpeech() { onStateChange(false) }
+
         override fun onError(error: Int) {
+            try {
+                am?.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_UNMUTE, 0)
+            } catch (_: Exception) {}
+
             val message = when (error) {
-                SpeechRecognizer.ERROR_NO_MATCH -> "No speech recognized"
-                SpeechRecognizer.ERROR_NETWORK -> "Network error"
-                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Listening timed out"
-                else -> "Listening paused"
+                SpeechRecognizer.ERROR_NO_MATCH -> "Didn't hear clearly. Tap orb to speak."
+                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Listening paused. Tap orb to speak."
+                else -> "Standby. Tap orb to speak."
             }
-            onErrorText(message)
+            onError(message)
             onStateChange(false)
         }
+
         override fun onResults(results: Bundle?) {
+            try {
+                am?.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_UNMUTE, 0)
+            } catch (_: Exception) {}
+
             val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
             val text = matches?.firstOrNull() ?: ""
-            if (text.isNotEmpty()) onResultText(text) else onErrorText("No input detected")
+            if (text.isNotEmpty()) onFinalResult(text) else onError("No speech detected. Tap orb.")
             onStateChange(false)
         }
-        override fun onPartialResults(partialResults: Bundle?) {}
+
+        override fun onPartialResults(partialResults: Bundle?) {
+            val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+            val partial = matches?.firstOrNull() ?: ""
+            if (partial.isNotEmpty()) {
+                onPartial(partial)
+            }
+        }
+
         override fun onEvent(eventType: Int, params: Bundle?) {}
     })
 
