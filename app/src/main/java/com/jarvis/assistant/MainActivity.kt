@@ -154,7 +154,7 @@ fun JarvisMainScreen(
     onSpeak: (String, AppLanguage, () -> Unit) -> Unit,
     onStopAll: () -> Unit
 ) {
-    var apiKey by remember { mutableStateOf(prefs.getString("gemini_api_key", "") ?: "") }
+    var apiKey by remember { mutableStateOf(prefs.getString("gemini_api_key", "")?.trim() ?: "") }
     var showKeyDialog by remember { mutableStateOf(apiKey.isEmpty()) }
     var tempKeyInput by remember { mutableStateOf(apiKey) }
 
@@ -197,7 +197,6 @@ fun JarvisMainScreen(
                     statusText = aiReply
 
                     onSpeak(aiReply, selectedLanguage) {
-                        // After speaking finishes, auto-listen if continuous mode is on!
                         if (isContinuousMode) {
                             coroutineScope.launch {
                                 delay(350)
@@ -238,7 +237,7 @@ fun JarvisMainScreen(
             .fillMaxSize()
             .background(Color(0xFF000000))
     ) {
-        // Top Bar: Language Selector & API Key Settings Icon
+        // Top Bar: Language Pills + Key Settings
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -246,7 +245,6 @@ fun JarvisMainScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Language Pills
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 AppLanguage.entries.forEach { lang ->
                     val isSelected = selectedLanguage == lang
@@ -273,7 +271,6 @@ fun JarvisMainScreen(
                 }
             }
 
-            // Key Settings Button
             Box(
                 modifier = Modifier
                     .background(Color(0xFF181818), RoundedCornerShape(16.dp))
@@ -282,14 +279,14 @@ fun JarvisMainScreen(
             ) {
                 Text(
                     text = if (apiKey.isEmpty()) "⚠️ SET KEY" else "🔑 KEY",
-                    color = if (apiKey.isEmpty()) Color(0xFFFF5555) else Color(0xFF999999),
+                    color = if (apiKey.isEmpty()) Color(0xFFFF5555) else Color(0xFFE0E0E0),
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace
                 )
             }
         }
 
-        // Center: Living Smoky Luminous Orb
+        // Center: Glowing Living White Energy Orb
         Column(
             modifier = Modifier.align(Alignment.Center),
             horizontalAlignment = Alignment.CenterHorizontally
@@ -322,11 +319,10 @@ fun JarvisMainScreen(
 
             Spacer(modifier = Modifier.height(36.dp))
 
-            // Subtitle of what user said
             if (subtitleText.isNotEmpty()) {
                 Text(
                     text = subtitleText,
-                    color = Color(0xFF888888),
+                    color = Color(0xFFAAAAAA),
                     fontSize = 13.sp,
                     fontFamily = FontFamily.Monospace,
                     textAlign = TextAlign.Center,
@@ -335,7 +331,6 @@ fun JarvisMainScreen(
                 Spacer(modifier = Modifier.height(10.dp))
             }
 
-            // JARVIS Response / Status
             Text(
                 text = statusText,
                 color = Color.White,
@@ -347,7 +342,6 @@ fun JarvisMainScreen(
             )
         }
 
-        // Subtle bottom hint
         Text(
             text = if (isContinuousMode) "• HANDS-FREE LOOP ACTIVE •" else "TAP ORB TO START",
             color = if (isContinuousMode) Color(0xFF00FF88) else Color(0xFF444444),
@@ -359,7 +353,6 @@ fun JarvisMainScreen(
         )
     }
 
-    // API Key Dialog Box
     if (showKeyDialog) {
         AlertDialog(
             onDismissRequest = { if (apiKey.isNotEmpty()) showKeyDialog = false },
@@ -392,8 +385,9 @@ fun JarvisMainScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        apiKey = tempKeyInput.trim()
-                        prefs.edit().putString("gemini_api_key", apiKey).apply()
+                        val cleaned = tempKeyInput.trim()
+                        apiKey = cleaned
+                        prefs.edit().putString("gemini_api_key", cleaned).apply()
                         showKeyDialog = false
                         statusText = "KEY CONNECTED! TAP TO START"
                     },
@@ -426,7 +420,7 @@ fun JarvisEnergyOrb(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = if (isThinking) 2500 else 10000, easing = LinearEasing),
+            animation = tween(durationMillis = if (isThinking) 2200 else 9000, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "rotation"
@@ -436,7 +430,7 @@ fun JarvisEnergyOrb(
         initialValue = 360f,
         targetValue = 0f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = if (isThinking) 3500 else 15000, easing = LinearEasing),
+            animation = tween(durationMillis = if (isThinking) 3200 else 13000, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "counter_rotation"
@@ -446,7 +440,7 @@ fun JarvisEnergyOrb(
         initialValue = 0.95f,
         targetValue = 1.05f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 2800, easing = FastOutSlowInEasing),
+            animation = tween(durationMillis = 2600, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
         label = "breath"
@@ -467,77 +461,75 @@ fun JarvisEnergyOrb(
     ) {
         Canvas(modifier = Modifier.fillMaxSize()) {
             val center = Offset(size.width / 2f, size.height / 2f)
-            val baseRadius = (size.minDimension / 2.6f) * currentScale
+            val baseRadius = (size.minDimension / 2.7f) * currentScale
 
-            // High-contrast ethereal white smoky filaments
+            // Bright ethereal primary smoke rings
             val filaments = 10
             for (i in 0 until filaments) {
                 val phase = (i * (360f / filaments) + (if (i % 2 == 0) rotationAngle else counterRotation)) % 360f
                 val radians = Math.toRadians(phase.toDouble())
-                val offset = (sin(radians * 2.5) * 8f).toFloat()
+                val offset = (sin(radians * 2.8) * 8f).toFloat()
 
                 val filamentCenter = Offset(
                     center.x + (cos(radians) * offset).toFloat(),
                     center.y + (sin(radians) * offset).toFloat()
                 )
 
+                // High-visibility bright white filaments
+                val alpha = if (isListening) 0.85f else if (i % 2 == 0) 0.95f else 0.55f
                 drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            Color(0x00FFFFFF),
-                            Color(0x33FFFFFF),
-                            Color(0xEEFFFFFF), // Bright glowing smoke filament
-                            Color(0x00000000)
-                        ),
-                        center = filamentCenter,
-                        radius = baseRadius + (i * 3.5f)
-                    ),
+                    color = Color.White.copy(alpha = alpha),
                     center = filamentCenter,
-                    radius = baseRadius + (i * 2.8f),
-                    style = Stroke(width = if (i % 2 == 0) 4f else 2.2f)
+                    radius = baseRadius + (i * 2.2f),
+                    style = Stroke(width = if (i % 3 == 0) 3.5f else 1.8f)
                 )
             }
 
-            // Luminous glowing core
+            // Central radiant glow
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(
-                        Color(0x55FFFFFF),
-                        Color(0x18FFFFFF),
+                        Color(0x77FFFFFF),
+                        Color(0x22FFFFFF),
                         Color(0x00000000)
                     ),
                     center = center,
-                    radius = baseRadius * 0.9f
+                    radius = baseRadius * 0.92f
                 ),
                 center = center,
-                radius = baseRadius * 0.9f
+                radius = baseRadius * 0.92f
             )
         }
     }
 }
 
 suspend fun queryGemini(prompt: String, apiKey: String, language: AppLanguage): String = withContext(Dispatchers.IO) {
-    // Try modern Gemini endpoints
-    val endpoints = listOf(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent",
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+    val cleanKey = apiKey.trim()
+    val models = listOf(
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-2.5-flash-lite"
     )
 
     val systemInstruction = when (language) {
-        AppLanguage.ENGLISH -> "You are JARVIS, a helpful, intelligent personal AI. Answer concisely in 1 to 2 spoken sentences. Avoid asterisks or bullet points."
+        AppLanguage.ENGLISH -> "You are JARVIS, an intelligent, helpful personal AI. Answer concisely in 1 to 2 spoken sentences. Do not use asterisks or formatting."
         AppLanguage.NEPALI -> "तपाईं JARVIS हुनुहुन्छ। उत्तर १ वा २ वाक्यमा छोटो र प्रष्ट दिनुहोस्। नेपाली देवनागरी लिपिमा मात्र लेख्नुहोस्।"
         AppLanguage.HINDI -> "आप JARVIS हैं। उत्तर 1 या 2 वाक्यों में संक्षिप्त और स्पष्ट दें। हिन्दी देवनागरी लिपि में लिखें।"
     }
 
-    for (urlStr in endpoints) {
+    var lastErrorMessage = ""
+
+    for (model in models) {
         try {
-            val url = URL("$urlStr?key=$apiKey")
+            // New AQ. Auth keys MUST use x-goog-api-key header on the clean URL
+            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
             val conn = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
-                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                setRequestProperty("x-goog-api-key", cleanKey)
                 doOutput = true
-                connectTimeout = 8000
+                connectTimeout = 9000
                 readTimeout = 12000
             }
 
@@ -558,22 +550,29 @@ suspend fun queryGemini(prompt: String, apiKey: String, language: AppLanguage): 
                 os.write(payload.toString().toByteArray(Charsets.UTF_8))
             }
 
-            if (conn.responseCode == 200) {
+            val code = conn.responseCode
+            if (code == 200) {
                 val resp = conn.inputStream.bufferedReader().use { it.readText() }
                 val root = JSONObject(resp)
-                val text = root.getJSONArray("candidates")
-                    .getJSONObject(0)
-                    .getJSONObject("content")
-                    .getJSONArray("parts")
-                    .getJSONObject(0)
-                    .getString("text")
-                return@withContext text.trim()
+                val candidates = root.optJSONArray("candidates")
+                if (candidates != null && candidates.length() > 0) {
+                    val content = candidates.getJSONObject(0).optJSONObject("content")
+                    val parts = content?.optJSONArray("parts")
+                    if (parts != null && parts.length() > 0) {
+                        val text = parts.getJSONObject(0).optString("text", "")
+                        if (text.isNotEmpty()) return@withContext text.trim()
+                    }
+                }
+            } else {
+                val err = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+                lastErrorMessage = "[$code]: ${if (err.contains("API_KEY_INVALID")) "Invalid API Key" else err.take(80)}"
             }
-        } catch (_: Exception) {
-            // try next model fallback
+        } catch (e: Exception) {
+            lastErrorMessage = e.localizedMessage ?: "Network error"
         }
     }
-    return@withContext "I am having trouble connecting to Gemini. Please verify your internet and API key."
+
+    return@withContext "Google Gemini Error: $lastErrorMessage"
 }
 
 fun startListening(
@@ -608,7 +607,7 @@ fun startListening(
                 SpeechRecognizer.ERROR_NO_MATCH -> "No speech recognized"
                 SpeechRecognizer.ERROR_NETWORK -> "Network error"
                 SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Listening timed out"
-                else -> "Recognition paused"
+                else -> "Listening paused"
             }
             onErrorText(message)
             onStateChange(false)
