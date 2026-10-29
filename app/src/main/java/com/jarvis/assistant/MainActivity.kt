@@ -77,6 +77,8 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import kotlin.math.cos
 import kotlin.math.sin
@@ -89,9 +91,6 @@ enum class AppLanguage(val label: String, val locale: Locale, val tag: String, v
 
 var activeWorkingModel: String? = null
 
-// -------------------------------------------------------------
-// SYSTEM ACCESSIBILITY CONTROLLER (Full Device Automation)
-// -------------------------------------------------------------
 class JarvisAccessibilityService : AccessibilityService() {
     companion object {
         var instance: JarvisAccessibilityService? = null
@@ -151,6 +150,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 if (availableVoices != null) {
                     val naturalVoice = availableVoices.firstOrNull { v ->
                         v.locale.language == language.locale.language &&
+                        !v.isNetworkConnectionRequired &&
                         (v.name.contains("male", ignoreCase = true) || 
                          v.name.contains("neural", ignoreCase = true) ||
                          v.name.contains("en-gb", ignoreCase = true))
@@ -244,7 +244,6 @@ fun JarvisMainScreen(
             .fillMaxSize()
             .background(Color(0xFF000000))
     ) {
-        // Top Navigation Bar
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -316,7 +315,6 @@ fun JarvisMainScreen(
             }
         }
 
-        // Center: Living Smoky Orb
         Column(
             modifier = Modifier.align(Alignment.Center),
             horizontalAlignment = Alignment.CenterHorizontally
@@ -428,7 +426,7 @@ fun JarvisMainScreen(
 }
 
 // -------------------------------------------------------------
-// UNIFIED MASTER INTELLIGENCE ROUTER (Accessibility & Hardware)
+// UNIFIED MASTER INTELLIGENCE ROUTER
 // -------------------------------------------------------------
 suspend fun processEverything(
     context: Context,
@@ -439,7 +437,7 @@ suspend fun processEverything(
     val q = query.lowercase().trim()
     val access = JarvisAccessibilityService.instance
 
-    // 1. HARDWARE: LOCK SCREEN (Accessibility Power)
+    // 1. HARDWARE: LOCK SCREEN
     if (q.contains("lock") || q.contains("लक") || q.contains("स्क्रीन बंद")) {
         if (access != null) {
             access.performGlobalAction(AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN)
@@ -463,7 +461,7 @@ suspend fun processEverything(
         }
     }
 
-    // 3. HARDWARE: NAVIGATION (Home / Back / Recents)
+    // 3. HARDWARE: NAVIGATION
     if (q.contains("go home") || q.contains("home screen")) {
         access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
         return@withContext "Navigating to home screen, sir."
@@ -507,7 +505,27 @@ suspend fun processEverything(
         }
     }
 
-    // 6. HARDWARE: FLASHLIGHT
+    // 6. INSTANT LOCAL CLOCK & DATE (Offline & Instant)
+    if (q.contains("time") || q.contains("समय") || q.contains("बजे")) {
+        val sdf = SimpleDateFormat("hh:mm a", Locale.getDefault())
+        val timeStr = sdf.format(Date())
+        return@withContext when (language) {
+            AppLanguage.ENGLISH -> "The time is currently $timeStr, sir."
+            AppLanguage.NEPALI -> "अहिले समय $timeStr भएको छ, हजुर।"
+            AppLanguage.HINDI -> "अभी समय $timeStr हुआ है।"
+        }
+    }
+    if (q.contains("date") || q.contains("today") || q.contains("मिति") || q.contains("तारीख")) {
+        val sdf = SimpleDateFormat("EEEE, MMMM d, yyyy", Locale.getDefault())
+        val dateStr = sdf.format(Date())
+        return@withContext when (language) {
+            AppLanguage.ENGLISH -> "Today is $dateStr, sir."
+            AppLanguage.NEPALI -> "आजको मिति $dateStr हो, हजुर।"
+            AppLanguage.HINDI -> "आज $dateStr है।"
+        }
+    }
+
+    // 7. HARDWARE: FLASHLIGHT
     if (q.contains("flashlight") || q.contains("torch") || q.contains("बत्ती") || q.contains("टर्च") || q.contains("टॉर्च") || q.contains("फ्लैशलाइट")) {
         val turnOn = q.contains("on") || q.contains("बाल") || q.contains("चालू") || q.contains("जला")
         val success = toggleFlashlight(context, turnOn)
@@ -520,36 +538,36 @@ suspend fun processEverything(
         }
     }
 
-    // 7. HARDWARE: SYSTEM STATUS
+    // 8. HARDWARE: SYSTEM STATUS
     if (q.contains("status") || q.contains("battery") || q.contains("ब्याट्री") || q.contains("बैटरी") || q.contains("सिस्टम")) {
         return@withContext getDeviceStatus(context, language)
     }
 
-    // 8. HARDWARE: APP LAUNCHER
+    // 9. HARDWARE: UNIVERSAL APP LAUNCHER (Opens ANY app on phone!)
     if (q.startsWith("open ") || q.startsWith("launch ") || q.contains(" खोल") || q.contains(" खोल्नुहोस्")) {
-        val launchMsg = launchAppByName(context, q, language)
+        val launchMsg = launchAnyApp(context, q, language)
         if (launchMsg != null) return@withContext launchMsg
     }
 
-    // 9. LIVE WEATHER
+    // 10. LIVE WEATHER
     if (q.contains("weather") || q.contains("temperature") || q.contains("मौसम") || q.contains("तापक्रम") || q.contains("गर्मी") || q.contains("पानी पर्छ")) {
         val weatherInfo = fetchLiveWeather(language)
         if (weatherInfo != null) return@withContext weatherInfo
     }
 
-    // 10. WIKIPEDIA FACTUAL SUMMARY
+    // 11. WIKIPEDIA FACTUAL SUMMARY
     if (q.startsWith("who is") || q.startsWith("who was") || q.startsWith("tell me about") || q.contains("wikipedia") || q.contains("विकिपीडिया") || q.contains("को हुन्") || q.contains("बारेमा भन")) {
         val wikiTopic = extractWikiTopic(q)
         val wikiAnswer = fetchWikipediaSummary(wikiTopic, language)
         if (wikiAnswer != null) return@withContext wikiAnswer
     }
 
-    // 11. GEMINI AI AUTO-DISCOVERY WITH HUMAN PERSONA
+    // 12. GEMINI AI: DIRECT CHAT WITH RE-AUTH PROTECTION
     if (apiKey.isNotEmpty()) {
         return@withContext queryGeminiAutoDiscover(query, apiKey, language)
     }
 
-    return@withContext "Please set your Gemini key to enable full AI conversation."
+    return@withContext "Please tap 🔑 KEY and paste your Gemini key to chat with AI."
 }
 
 // -------------------------------------------------------------
@@ -580,42 +598,41 @@ fun getDeviceStatus(context: Context, language: AppLanguage): String {
     }
 }
 
-fun launchAppByName(context: Context, query: String, language: AppLanguage): String? {
-    val q = query.lowercase()
-    val appMap = mapOf(
-        "youtube" to "com.google.android.youtube",
-        "whatsapp" to "com.whatsapp",
-        "chrome" to "com.android.chrome",
-        "settings" to "com.android.settings",
-        "maps" to "com.google.android.apps.maps",
-        "spotify" to "com.spotify.music",
-        "facebook" to "com.facebook.katana",
-        "instagram" to "com.instagram.android"
-    )
+// DYNAMIC UNIVERSAL APP LAUNCHER
+fun launchAnyApp(context: Context, query: String, language: AppLanguage): String? {
+    val cleanTarget = query.lowercase()
+        .replace("open", "")
+        .replace("launch", "")
+        .replace("खोल", "")
+        .replace("खोल्नुहोस्", "")
+        .trim()
 
-    if (q.contains("camera") || q.contains("क्यामरा") || q.contains("कैमरा")) {
+    val pm = context.packageManager
+
+    // Camera Special Case
+    if (cleanTarget.contains("camera") || cleanTarget.contains("क्यामरा") || cleanTarget.contains("कैमरा")) {
         val camIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
         try {
             context.startActivity(camIntent)
-            return when (language) {
-                AppLanguage.ENGLISH -> "Opening the camera right now, sir."
-                AppLanguage.NEPALI -> "क्यामेरा खोल्दै छु, हजुर।"
-                AppLanguage.HINDI -> "कैमरा खोला जा रहा है।"
-            }
+            return "Opening camera right away, sir."
         } catch (_: Exception) {}
     }
 
-    for ((name, pkg) in appMap) {
-        if (q.contains(name)) {
-            val intent = context.packageManager.getLaunchIntentForPackage(pkg)?.apply {
+    // Dynamic Search Across All Installed Apps On Nothing Phone (2)
+    val installedApps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+    for (app in installedApps) {
+        val appLabel = pm.getApplicationLabel(app).toString().lowercase()
+        if (appLabel.isNotEmpty() && (cleanTarget.contains(appLabel) || appLabel.contains(cleanTarget))) {
+            val launchIntent = pm.getLaunchIntentForPackage(app.packageName)?.apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
-            if (intent != null) {
-                context.startActivity(intent)
+            if (launchIntent != null) {
+                context.startActivity(launchIntent)
+                val realName = pm.getApplicationLabel(app).toString()
                 return when (language) {
-                    AppLanguage.ENGLISH -> "Opening ${name.replaceFirstChar { it.uppercase() }} for you, sir."
-                    AppLanguage.NEPALI -> "${name.replaceFirstChar { it.uppercase() }} खोल्दै छु, हजुर।"
-                    AppLanguage.HINDI -> "${name.replaceFirstChar { it.uppercase() }} खोला जा रहा है।"
+                    AppLanguage.ENGLISH -> "Opening $realName for you, sir."
+                    AppLanguage.NEPALI -> "$realName खोल्दै छु, हजुर।"
+                    AppLanguage.HINDI -> "$realName खोला जा रहा है।"
                 }
             }
         }
@@ -800,6 +817,9 @@ suspend fun queryGeminiAutoDiscover(prompt: String, apiKey: String, language: Ap
                 }
             } else {
                 val err = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+                if (err.contains("API_KEY_INVALID") || err.contains("ACCESS_TOKEN_TYPE_UNSUPPORTED")) {
+                    return@withContext "API key expired or invalid. Tap 🔑 KEY to paste a fresh Google key, sir."
+                }
                 lastError = "[${conn.responseCode}]: $err"
             }
         } catch (e: Exception) {
