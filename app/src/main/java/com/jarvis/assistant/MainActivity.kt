@@ -2,22 +2,37 @@ package com.jarvis.assistant
 
 import android.Manifest
 import android.accessibilityservice.AccessibilityService
+import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.graphics.PixelFormat
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
+import android.net.Uri
 import android.os.BatteryManager
+import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+import android.provider.AlarmClock
 import android.provider.MediaStore
 import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.view.Gravity
+import android.view.KeyEvent
+import android.view.MotionEvent
+import android.view.View
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+import android.widget.ImageView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -90,7 +105,11 @@ enum class AppLanguage(val label: String, val locale: Locale, val tag: String, v
 }
 
 var activeWorkingModel: String? = null
+val chatHistory = mutableListOf<Pair<String, String>>()
 
+// -------------------------------------------------------------
+// SYSTEM ACCESSIBILITY CONTROLLER (Full Device Automation)
+// -------------------------------------------------------------
 class JarvisAccessibilityService : AccessibilityService() {
     companion object {
         var instance: JarvisAccessibilityService? = null
@@ -111,6 +130,96 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 }
 
+// -------------------------------------------------------------
+// FLOATING MINI-ORB OVERLAY SERVICE
+// -------------------------------------------------------------
+class JarvisFloatingService : Service() {
+    private var windowManager: WindowManager? = null
+    private var floatingView: View? = null
+
+    companion object {
+        var isRunning = false
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        isRunning = true
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+
+        val params = WindowManager.LayoutParams(
+            150, 150,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            else WindowManager.LayoutParams.TYPE_PHONE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 30
+            y = 350
+        }
+
+        val orbImage = ImageView(this).apply {
+            setImageResource(android.R.drawable.ic_btn_speak_now)
+            setBackgroundColor(android.graphics.Color.argb(190, 20, 20, 20))
+            setPadding(25, 25, 25, 25)
+        }
+        floatingView = orbImage
+
+        orbImage.setOnTouchListener(object : View.OnTouchListener {
+            private var initialX = 0
+            private var initialY = 0
+            private var initialTouchX = 0f
+            private var initialTouchY = 0f
+
+            override fun onTouch(v: View?, event: MotionEvent): Boolean {
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        initialX = params.x
+                        initialY = params.y
+                        initialTouchX = event.rawX
+                        initialTouchY = event.rawY
+                        return true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        params.x = initialX + (event.rawX - initialTouchX).toInt()
+                        params.y = initialY + (event.rawY - initialTouchY).toInt()
+                        windowManager?.updateViewLayout(floatingView, params)
+                        return true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        val diffX = Math.abs(event.rawX - initialTouchX)
+                        val diffY = Math.abs(event.rawY - initialTouchY)
+                        if (diffX < 15 && diffY < 15) {
+                            val launchApp = Intent(this@JarvisFloatingService, MainActivity::class.java).apply {
+                                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                            }
+                            startActivity(launchApp)
+                        }
+                        return true
+                    }
+                }
+                return false
+            }
+        })
+
+        try {
+            windowManager?.addView(floatingView, params)
+        } catch (_: Exception) {}
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        isRunning = false
+        if (floatingView != null) windowManager?.removeView(floatingView)
+    }
+}
+
+// -------------------------------------------------------------
+// MAIN ACTIVITY
+// -------------------------------------------------------------
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     private var speechRecognizer: SpeechRecognizer? = null
@@ -198,10 +307,25 @@ fun JarvisMainScreen(
     var rmsLevel by remember { mutableFloatStateOf(0f) }
     var statusText by remember { mutableStateOf("TAP ORB TO COMMUNICATE") }
     var liveTranscription by remember { mutableStateOf("") }
+    var isFloatingActive by remember { mutableStateOf(JarvisFloatingService.isRunning) }
 
     val coroutineScope = rememberCoroutineScope()
 
+    fun triggerHapticClick() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                vibratorManager?.defaultVibrator?.vibrate(VibrationEffect.createOneShot(35, VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                @Suppress("DEPRECATION")
+                val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                vibrator?.vibrate(35)
+            }
+        } catch (_: Exception) {}
+    }
+
     fun startVoiceSession() {
+        triggerHapticClick()
         liveTranscription = ""
         statusText = "LISTENING..."
         isListening = true
@@ -220,7 +344,7 @@ fun JarvisMainScreen(
                 isListening = false
 
                 coroutineScope.launch {
-                    val reply = processEverything(context, finalResult, apiKey, selectedLanguage)
+                    val reply = processEverything(context, prefs, finalResult, apiKey, selectedLanguage)
                     isThinking = false
                     statusText = reply
                     onSpeak(reply, selectedLanguage)
@@ -244,77 +368,151 @@ fun JarvisMainScreen(
             .fillMaxSize()
             .background(Color(0xFF000000))
     ) {
-        Row(
+        // Top Navigation Bar
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 54.dp, start = 20.dp, end = 20.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+                .padding(top = 50.dp, start = 16.dp, end = 16.dp)
         ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AppLanguage.entries.forEach { lang ->
-                    val isSelected = selectedLanguage == lang
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Languages
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    AppLanguage.entries.forEach { lang ->
+                        val isSelected = selectedLanguage == lang
+                        Box(
+                            modifier = Modifier
+                                .background(
+                                    color = if (isSelected) Color(0xFF2A2A2A) else Color(0xFF111111),
+                                    shape = RoundedCornerShape(16.dp)
+                                )
+                                .clickable {
+                                    triggerHapticClick()
+                                    selectedLanguage = lang
+                                    statusText = "${lang.name} ACTIVE"
+                                }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = lang.label,
+                                color = if (isSelected) Color.White else Color(0xFF666666),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                }
+
+                // Top Controls: Accessibility + Key
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    val isAccessActive = JarvisAccessibilityService.isEnabled()
                     Box(
                         modifier = Modifier
-                            .background(
-                                color = if (isSelected) Color(0xFF2A2A2A) else Color(0xFF111111),
-                                shape = RoundedCornerShape(16.dp)
-                            )
+                            .background(if (isAccessActive) Color(0xFF1B3820) else Color(0xFF382020), RoundedCornerShape(16.dp))
                             .clickable {
-                                selectedLanguage = lang
-                                statusText = "${lang.name} ACTIVE"
+                                triggerHapticClick()
+                                val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                }
+                                context.startActivity(intent)
                             }
-                            .padding(horizontal = 14.dp, vertical = 6.dp)
+                            .padding(horizontal = 9.dp, vertical = 6.dp)
                     ) {
                         Text(
-                            text = lang.label,
-                            color = if (isSelected) Color.White else Color(0xFF666666),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
+                            text = if (isAccessActive) "⚡ ACCESS" else "⚠️ ACCESS",
+                            color = if (isAccessActive) Color(0xFF00FF88) else Color(0xFFFF7777),
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .background(Color(0xFF1A1A1A), RoundedCornerShape(16.dp))
+                            .clickable {
+                                triggerHapticClick()
+                                showKeyDialog = true
+                            }
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = if (apiKey.isEmpty()) "⚠️ KEY" else "🔑 KEY",
+                            color = if (apiKey.isEmpty()) Color(0xFFFF5555) else Color(0xFFE0E0E0),
+                            fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace
                         )
                     }
                 }
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                val isAccessActive = JarvisAccessibilityService.isEnabled()
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Sub-Bar: Floating Orb Toggle & Clear Memory
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Floating Overlay Pill
                 Box(
                     modifier = Modifier
-                        .background(if (isAccessActive) Color(0xFF1B3820) else Color(0xFF382020), RoundedCornerShape(16.dp))
+                        .background(if (isFloatingActive) Color(0xFF1B2B38) else Color(0xFF161616), RoundedCornerShape(14.dp))
                         .clickable {
-                            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
-                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            triggerHapticClick()
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(context)) {
+                                val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}")).apply {
+                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                }
+                                context.startActivity(intent)
+                            } else {
+                                if (isFloatingActive) {
+                                    context.stopService(Intent(context, JarvisFloatingService::class.java))
+                                    isFloatingActive = false
+                                } else {
+                                    context.startService(Intent(context, JarvisFloatingService::class.java))
+                                    isFloatingActive = true
+                                }
                             }
-                            context.startActivity(intent)
                         }
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .padding(horizontal = 12.dp, vertical = 5.dp)
                 ) {
                     Text(
-                        text = if (isAccessActive) "⚡ FULL ACCESS" else "⚠️ ACCESSIBILITY",
-                        color = if (isAccessActive) Color(0xFF00FF88) else Color(0xFFFF7777),
+                        text = if (isFloatingActive) "⚪ MINI-ORB ON" else "⚫ MINI-ORB OFF",
+                        color = if (isFloatingActive) Color(0xFF88CCFF) else Color(0xFF666666),
                         fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold
+                        fontFamily = FontFamily.Monospace
                     )
                 }
 
-                Box(
-                    modifier = Modifier
-                        .background(Color(0xFF1A1A1A), RoundedCornerShape(16.dp))
-                        .clickable { showKeyDialog = true }
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        text = if (apiKey.isEmpty()) "⚠️ SET KEY" else "🔑 KEY",
-                        color = if (apiKey.isEmpty()) Color(0xFFFF5555) else Color(0xFFE0E0E0),
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
+                // Clear Conversation History
+                if (chatHistory.isNotEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .background(Color(0xFF1C1C1C), RoundedCornerShape(14.dp))
+                            .clickable {
+                                triggerHapticClick()
+                                chatHistory.clear()
+                                statusText = "CONVERSATION MEMORY CLEARED"
+                            }
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                    ) {
+                        Text(
+                            text = "🔄 RESET MEMORY",
+                            color = Color(0xFFAAAAAA),
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
                 }
             }
         }
 
+        // Center: Glowing Living Smoky Orb
         Column(
             modifier = Modifier.align(Alignment.Center),
             horizontalAlignment = Alignment.CenterHorizontally
@@ -324,6 +522,7 @@ fun JarvisMainScreen(
                 isThinking = isThinking,
                 rmsLevel = rmsLevel,
                 onClick = {
+                    triggerHapticClick()
                     if (isListening) {
                         speechRecognizer.stopListening()
                         isListening = false
@@ -426,10 +625,11 @@ fun JarvisMainScreen(
 }
 
 // -------------------------------------------------------------
-// UNIFIED MASTER INTELLIGENCE ROUTER
+// MASTER COMMAND ROUTER (ALL NEW POWERS INCLUDED)
 // -------------------------------------------------------------
 suspend fun processEverything(
     context: Context,
+    prefs: SharedPreferences,
     query: String,
     apiKey: String,
     language: AppLanguage
@@ -447,7 +647,7 @@ suspend fun processEverything(
                 AppLanguage.HINDI -> "डिवाइस लॉक किया जा रहा है।"
             }
         } else {
-            return@withContext "Please tap '⚠️ ACCESSIBILITY' at the top to enable screen control, sir."
+            return@withContext "Please tap '⚠️ ACCESS' at the top to enable screen control, sir."
         }
     }
 
@@ -461,7 +661,78 @@ suspend fun processEverything(
         }
     }
 
-    // 3. HARDWARE: NAVIGATION
+    // 3. HARDWARE: ALARMS & TIMERS
+    if (q.contains("alarm") || q.contains("अलार्म")) {
+        val alarmSet = setSystemAlarm(context, q)
+        if (alarmSet != null) return@withContext alarmSet
+    }
+    if (q.contains("timer") || q.contains("टाइमर")) {
+        val timerSet = setSystemTimer(context, q)
+        if (timerSet != null) return@withContext timerSet
+    }
+
+    // 4. HARDWARE: MUSIC / MEDIA CONTROLS
+    if (q.contains("play music") || q.contains("resume music") || q == "play") {
+        controlMedia(context, KeyEvent.KEYCODE_MEDIA_PLAY)
+        return@withContext "Playing music, sir."
+    }
+    if (q.contains("pause music") || q.contains("stop music") || q == "pause" || q.contains("बन्द गर")) {
+        controlMedia(context, KeyEvent.KEYCODE_MEDIA_PAUSE)
+        return@withContext "Music paused, sir."
+    }
+    if (q.contains("next song") || q.contains("next track") || q == "next") {
+        controlMedia(context, KeyEvent.KEYCODE_MEDIA_NEXT)
+        return@withContext "Playing next track, sir."
+    }
+    if (q.contains("previous song") || q == "previous") {
+        controlMedia(context, KeyEvent.KEYCODE_MEDIA_PREVIOUS)
+        return@withContext "Playing previous track, sir."
+    }
+
+    // 5. LOCAL PERSONAL MEMORY VAULT (Remember facts / Read facts)
+    if (q.startsWith("remember that ") || q.startsWith("remember ")) {
+        val fact = q.removePrefix("remember that ").removePrefix("remember ").trim()
+        val existing = prefs.getString("memory_notes", "") ?: ""
+        val updated = if (existing.isEmpty()) fact else "$existing\n$fact"
+        prefs.edit().putString("memory_notes", updated).apply()
+        return@withContext "Noted and stored in my memory vault, sir."
+    }
+    if (q.contains("what do you remember") || q.contains("read my notes") || q.contains("where is my") || q.contains("where are my")) {
+        val memory = prefs.getString("memory_notes", "") ?: ""
+        if (memory.isNotEmpty()) {
+            return@withContext "Here is what I have stored in your memory vault, sir: $memory"
+        } else {
+            return@withContext "Your memory vault is currently empty, sir."
+        }
+    }
+
+    // 6. PHONE CALLING & WHATSAPP
+    if (q.startsWith("call ") || q.startsWith("phone ")) {
+        val target = q.removePrefix("call ").removePrefix("phone ").trim()
+        val digits = target.filter { it.isDigit() }
+        val callIntent = if (digits.length >= 7) {
+            Intent(Intent.ACTION_DIAL, Uri.parse("tel:$digits"))
+        } else {
+            Intent(Intent.ACTION_DIAL)
+        }.apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
+        try {
+            context.startActivity(callIntent)
+            return@withContext "Opening dialer for $target, sir."
+        } catch (_: Exception) {}
+    }
+    if (q.startsWith("whatsapp ") || q.startsWith("send whatsapp")) {
+        val clean = q.removePrefix("send whatsapp to ").removePrefix("whatsapp ").trim()
+        val parts = clean.split(" message ", " text ", " ")
+        val phoneNum = parts.firstOrNull { it.filter { c -> c.isDigit() }.length >= 8 } ?: ""
+        val msg = if (parts.size > 1) clean.substringAfter(phoneNum).trim() else "Hello"
+        val waUrl = "https://api.whatsapp.com/send?phone=$phoneNum&text=${URLEncoder.encode(msg, "UTF-8")}"
+        try {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(waUrl)).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK })
+            return@withContext "Launching WhatsApp, sir."
+        } catch (_: Exception) {}
+    }
+
+    // 7. HARDWARE: NAVIGATION
     if (q.contains("go home") || q.contains("home screen")) {
         access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
         return@withContext "Navigating to home screen, sir."
@@ -475,7 +746,7 @@ suspend fun processEverything(
         return@withContext "Showing recent applications, sir."
     }
 
-    // 4. HARDWARE: NOTIFICATIONS & QUICK SETTINGS
+    // 8. HARDWARE: NOTIFICATIONS & QUICK SETTINGS
     if (q.contains("notifications") || q.contains("notification")) {
         access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS)
         return@withContext "Opening notification panel, sir."
@@ -485,7 +756,7 @@ suspend fun processEverything(
         return@withContext "Opening quick settings, sir."
     }
 
-    // 5. HARDWARE: VOLUME CONTROL
+    // 9. HARDWARE: VOLUME CONTROL
     if (q.contains("volume") || q.contains("आवाज") || q.contains("ध्वनि")) {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         return@withContext when {
@@ -505,73 +776,123 @@ suspend fun processEverything(
         }
     }
 
-    // 6. INSTANT LOCAL CLOCK & DATE (Offline & Instant)
+    // 10. INSTANT CLOCK & DATE
     if (q.contains("time") || q.contains("समय") || q.contains("बजे")) {
         val sdf = SimpleDateFormat("hh:mm a", Locale.getDefault())
         val timeStr = sdf.format(Date())
-        return@withContext when (language) {
-            AppLanguage.ENGLISH -> "The time is currently $timeStr, sir."
-            AppLanguage.NEPALI -> "अहिले समय $timeStr भएको छ, हजुर।"
-            AppLanguage.HINDI -> "अभी समय $timeStr हुआ है।"
-        }
+        return@withContext "The time is currently $timeStr, sir."
     }
     if (q.contains("date") || q.contains("today") || q.contains("मिति") || q.contains("तारीख")) {
         val sdf = SimpleDateFormat("EEEE, MMMM d, yyyy", Locale.getDefault())
         val dateStr = sdf.format(Date())
-        return@withContext when (language) {
-            AppLanguage.ENGLISH -> "Today is $dateStr, sir."
-            AppLanguage.NEPALI -> "आजको मिति $dateStr हो, हजुर।"
-            AppLanguage.HINDI -> "आज $dateStr है।"
-        }
+        return@withContext "Today is $dateStr, sir."
     }
 
-    // 7. HARDWARE: FLASHLIGHT
+    // 11. HARDWARE: FLASHLIGHT
     if (q.contains("flashlight") || q.contains("torch") || q.contains("बत्ती") || q.contains("टर्च") || q.contains("टॉर्च") || q.contains("फ्लैशलाइट")) {
         val turnOn = q.contains("on") || q.contains("बाल") || q.contains("चालू") || q.contains("जला")
         val success = toggleFlashlight(context, turnOn)
         if (success) {
-            return@withContext when (language) {
-                AppLanguage.ENGLISH -> if (turnOn) "Right away, sir. Flashlight is on." else "Flashlight turned off, sir."
-                AppLanguage.NEPALI -> if (turnOn) "हस्, टर्च बालियो।" else "टर्च बन्द गरियो, हजुर।"
-                AppLanguage.HINDI -> if (turnOn) "टॉर्च चालू कर दी गई है।" else "टॉर्च बंद कर दी गई है।"
-            }
+            return@withContext if (turnOn) "Right away, sir. Flashlight is on." else "Flashlight turned off, sir."
         }
     }
 
-    // 8. HARDWARE: SYSTEM STATUS
+    // 12. HARDWARE: SYSTEM STATUS
     if (q.contains("status") || q.contains("battery") || q.contains("ब्याट्री") || q.contains("बैटरी") || q.contains("सिस्टम")) {
         return@withContext getDeviceStatus(context, language)
     }
 
-    // 9. HARDWARE: UNIVERSAL APP LAUNCHER (Opens ANY app on phone!)
+    // 13. HARDWARE: UNIVERSAL APP LAUNCHER
     if (q.startsWith("open ") || q.startsWith("launch ") || q.contains(" खोल") || q.contains(" खोल्नुहोस्")) {
         val launchMsg = launchAnyApp(context, q, language)
         if (launchMsg != null) return@withContext launchMsg
     }
 
-    // 10. LIVE WEATHER
+    // 14. LIVE WEATHER
     if (q.contains("weather") || q.contains("temperature") || q.contains("मौसम") || q.contains("तापक्रम") || q.contains("गर्मी") || q.contains("पानी पर्छ")) {
         val weatherInfo = fetchLiveWeather(language)
         if (weatherInfo != null) return@withContext weatherInfo
     }
 
-    // 11. WIKIPEDIA FACTUAL SUMMARY
+    // 15. WIKIPEDIA
     if (q.startsWith("who is") || q.startsWith("who was") || q.startsWith("tell me about") || q.contains("wikipedia") || q.contains("विकिपीडिया") || q.contains("को हुन्") || q.contains("बारेमा भन")) {
         val wikiTopic = extractWikiTopic(q)
         val wikiAnswer = fetchWikipediaSummary(wikiTopic, language)
         if (wikiAnswer != null) return@withContext wikiAnswer
     }
 
-    // 12. GEMINI AI: DIRECT CHAT WITH RE-AUTH PROTECTION
+    // 16. GEMINI MULTI-TURN CONVERSATION MEMORY BRAIN
     if (apiKey.isNotEmpty()) {
-        return@withContext queryGeminiAutoDiscover(query, apiKey, language)
+        return@withContext queryGeminiWithMemory(query, apiKey, language)
     }
 
     return@withContext "Please tap 🔑 KEY and paste your Gemini key to chat with AI."
 }
 
 // -------------------------------------------------------------
-// HARDWARE CONTROLS
+// MEDIA CONTROLS
+// -------------------------------------------------------------
+fun controlMedia(context: Context, keyCode: Int) {
+    try {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val eventDown = KeyEvent(KeyEvent.ACTION_DOWN, keyCode)
+        val eventUp = KeyEvent(KeyEvent.ACTION_UP, keyCode)
+        am.dispatchMediaKeyEvent(eventDown)
+        am.dispatchMediaKeyEvent(eventUp)
+    } catch (_: Exception) {}
+}
+
+// -------------------------------------------------------------
+// ALARMS & TIMERS
+// -------------------------------------------------------------
+fun setSystemAlarm(context: Context, query: String): String? {
+    try {
+        val digits = query.filter { it.isDigit() || it == ':' || it == ' ' }.trim()
+        var hour = 7
+        var minute = 0
+        val isPm = query.contains("pm", ignoreCase = true)
+
+        if (digits.contains(":")) {
+            val parts = digits.split(":")
+            hour = parts[0].trim().toIntOrNull() ?: 7
+            minute = parts[1].take(2).trim().toIntOrNull() ?: 0
+        } else {
+            hour = digits.split(" ").firstOrNull { it.isNotEmpty() }?.toIntOrNull() ?: 7
+        }
+
+        if (isPm && hour < 12) hour += 12
+        if (!isPm && hour == 12 && query.contains("am", ignoreCase = true)) hour = 0
+
+        val alarmIntent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
+            putExtra(AlarmClock.EXTRA_HOUR, hour)
+            putExtra(AlarmClock.EXTRA_MINUTES, minute)
+            putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+            putExtra(AlarmClock.EXTRA_MESSAGE, "JARVIS Alarm")
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        context.startActivity(alarmIntent)
+        val displayMin = if (minute < 10) "0$minute" else "$minute"
+        return "Alarm scheduled for $hour:$displayMin, sir."
+    } catch (_: Exception) { return null }
+}
+
+fun setSystemTimer(context: Context, query: String): String? {
+    try {
+        val number = query.filter { it.isDigit() }.toIntOrNull() ?: 5
+        val seconds = if (query.contains("second")) number else number * 60
+        val timerIntent = Intent(AlarmClock.ACTION_SET_TIMER).apply {
+            putExtra(AlarmClock.EXTRA_LENGTH, seconds)
+            putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+            putExtra(AlarmClock.EXTRA_MESSAGE, "JARVIS Timer")
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        context.startActivity(timerIntent)
+        return "Timer set for $number ${if (query.contains("second")) "seconds" else "minutes"}, sir."
+    } catch (_: Exception) { return null }
+}
+
+// -------------------------------------------------------------
+// FLASHLIGHT & DEVICE STATUS
 // -------------------------------------------------------------
 fun toggleFlashlight(context: Context, turnOn: Boolean): Boolean {
     return try {
@@ -591,25 +912,16 @@ fun getDeviceStatus(context: Context, language: AppLanguage): String {
     val status = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
     val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
 
-    return when (language) {
-        AppLanguage.ENGLISH -> "All systems nominal, sir. Your battery is sitting at $pct percent and ${if (isCharging) "charging nicely" else "running on battery"}. Neural cores are operating smoothly."
-        AppLanguage.NEPALI -> "सबै प्रणाली सामान्य छन्, हजुर। ब्याट्री $pct प्रतिशत छ र ${if (isCharging) "चार्ज हुँदैछ" else "ब्याट्रीमा चल्दैछ"}।"
-        AppLanguage.HINDI -> "सभी सिस्टम सामान्य हैं। बैटरी $pct प्रतिशत है और ${if (isCharging) "चार्ज हो रही है" else "बैटरी पर चल रही है"}।"
-    }
+    return "All systems nominal, sir. Your battery is at $pct percent and ${if (isCharging) "charging nicely" else "running on battery"}. Neural cores fully operational."
 }
 
-// DYNAMIC UNIVERSAL APP LAUNCHER
+// -------------------------------------------------------------
+// UNIVERSAL APP LAUNCHER
+// -------------------------------------------------------------
 fun launchAnyApp(context: Context, query: String, language: AppLanguage): String? {
-    val cleanTarget = query.lowercase()
-        .replace("open", "")
-        .replace("launch", "")
-        .replace("खोल", "")
-        .replace("खोल्नुहोस्", "")
-        .trim()
-
+    val cleanTarget = query.lowercase().replace("open", "").replace("launch", "").replace("खोल", "").trim()
     val pm = context.packageManager
 
-    // Camera Special Case
     if (cleanTarget.contains("camera") || cleanTarget.contains("क्यामरा") || cleanTarget.contains("कैमरा")) {
         val camIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
         try {
@@ -618,7 +930,6 @@ fun launchAnyApp(context: Context, query: String, language: AppLanguage): String
         } catch (_: Exception) {}
     }
 
-    // Dynamic Search Across All Installed Apps On Nothing Phone (2)
     val installedApps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
     for (app in installedApps) {
         val appLabel = pm.getApplicationLabel(app).toString().lowercase()
@@ -628,12 +939,7 @@ fun launchAnyApp(context: Context, query: String, language: AppLanguage): String
             }
             if (launchIntent != null) {
                 context.startActivity(launchIntent)
-                val realName = pm.getApplicationLabel(app).toString()
-                return when (language) {
-                    AppLanguage.ENGLISH -> "Opening $realName for you, sir."
-                    AppLanguage.NEPALI -> "$realName खोल्दै छु, हजुर।"
-                    AppLanguage.HINDI -> "$realName खोला जा रहा है।"
-                }
+                return "Opening ${pm.getApplicationLabel(app)} for you, sir."
             }
         }
     }
@@ -671,20 +977,15 @@ fun fetchLiveWeather(language: AppLanguage): String? {
             val code = current.getInt("weather_code")
 
             val condition = when (code) {
-                0 -> if (language == AppLanguage.NEPALI) "सफा आकाश" else if (language == AppLanguage.HINDI) "साफ आसमान" else "clear skies"
-                1, 2, 3 -> if (language == AppLanguage.NEPALI) "आंशिक बादल" else if (language == AppLanguage.HINDI) "हल्के बादल" else "partly cloudy skies"
-                45, 48 -> if (language == AppLanguage.NEPALI) "कुहिरो" else if (language == AppLanguage.HINDI) "कोहरा" else "mist and fog"
-                51, 53, 55, 61, 63, 65 -> if (language == AppLanguage.NEPALI) "वर्षा" else if (language == AppLanguage.HINDI) "बारिश" else "rain showers"
-                71, 73, 75 -> if (language == AppLanguage.NEPALI) "हिउँ" else if (language == AppLanguage.HINDI) "बर्फबारी" else "snowfall"
-                95, 96, 99 -> if (language == AppLanguage.NEPALI) "चट्याङ" else if (language == AppLanguage.HINDI) "तूफान" else "thunderstorms"
-                else -> if (language == AppLanguage.NEPALI) "सामान्य मौसम" else if (language == AppLanguage.HINDI) "सामान्य मौसम" else "pleasant conditions"
+                0 -> "clear skies"
+                1, 2, 3 -> "partly cloudy skies"
+                45, 48 -> "mist and fog"
+                51, 53, 55, 61, 63, 65 -> "rain showers"
+                71, 73, 75 -> "snowfall"
+                95, 96, 99 -> "thunderstorms"
+                else -> "pleasant conditions"
             }
-
-            return when (language) {
-                AppLanguage.ENGLISH -> "In $cityName, it is currently $temp degrees Celsius with $condition, sir."
-                AppLanguage.NEPALI -> "$cityName मा अहिले तापक्रम $temp डिग्री सेल्सियस र $condition छ, हजुर।"
-                AppLanguage.HINDI -> "$cityName में अभी तापमान $temp डिग्री सेल्सियस और $condition है।"
-            }
+            return "In $cityName, it is currently $temp degrees Celsius with $condition, sir."
         }
         null
     } catch (_: Exception) { null }
@@ -700,9 +1001,6 @@ fun extractWikiTopic(query: String): String {
         .replace("tell me about", "", ignoreCase = true)
         .replace("what is", "", ignoreCase = true)
         .replace("wikipedia", "", ignoreCase = true)
-        .replace("को हुन्", "", ignoreCase = true)
-        .replace("बारेमा भन", "", ignoreCase = true)
-        .replace("विकिपीडिया", "", ignoreCase = true)
         .trim()
 }
 
@@ -739,12 +1037,12 @@ fun fetchWikipediaSummary(topic: String, language: AppLanguage): String? {
 }
 
 // -------------------------------------------------------------
-// GEMINI AUTO-DISCOVERY WITH HUMAN PERSONA
+// GEMINI MULTI-TURN CONVERSATION BRAIN
 // -------------------------------------------------------------
-suspend fun queryGeminiAutoDiscover(prompt: String, apiKey: String, language: AppLanguage): String = withContext(Dispatchers.IO) {
+suspend fun queryGeminiWithMemory(prompt: String, apiKey: String, language: AppLanguage): String = withContext(Dispatchers.IO) {
     val cleanKey = apiKey.trim()
     val systemInstruction = when (language) {
-        AppLanguage.ENGLISH -> "You are JARVIS, a sophisticated, warm personal AI companion with subtle British wit. Speak like a living human companion, not a textbook. Use natural conversational phrases like 'Certainly, sir', 'Well, allow me to explain', or 'Indeed'. Keep responses brief (1 to 2 spoken sentences max). Never use asterisks or formatting."
+        AppLanguage.ENGLISH -> "You are JARVIS, a sophisticated, warm personal AI companion with subtle British wit. Speak like a living human companion. Keep responses brief (1 to 2 spoken sentences max). Never use asterisks or markdown formatting."
         AppLanguage.NEPALI -> "तपाईं JARVIS हुनुहुन्छ—एक आत्मीय, बुद्धिमान र विनम्र व्यक्तिगत AI। एक सहयोगी मित्र जस्तै स्वाभाविक र न्यानो भाषामा बोल्नुहोस्। उत्तर १ वा २ वाक्यमा छोटो र प्रष्ट दिनुहोस्। नेपाली देवनागरीमा मात्र लेख्नुहोस्।"
         AppLanguage.HINDI -> "आप JARVIS हैं—एक समझदार, विनम्र और मित्रवत AI साथी। इंसान की तरह सहज भाव से बात करें। उत्तर 1 या 2 वाक्यों में संक्षिप्त और स्पष्ट दें। हिन्दी देवनागरी में लिखें।"
     }
@@ -755,16 +1053,14 @@ suspend fun queryGeminiAutoDiscover(prompt: String, apiKey: String, language: Ap
     } else {
         val discovered = fetchAvailableModelsFromGoogle(cleanKey)
         candidateModels.addAll(discovered)
-        candidateModels.addAll(listOf(
-            "gemini-1.5-flash",
-            "gemini-1.5-flash-latest",
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-exp",
-            "gemini-2.5-flash-lite"
-        ))
+        candidateModels.addAll(listOf("gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite"))
     }
 
-    var lastError = ""
+    // Keep conversation memory bounded (last 6 exchanges)
+    if (chatHistory.size > 8) {
+        chatHistory.removeAt(0)
+        chatHistory.removeAt(0)
+    }
 
     for (rawModel in candidateModels.distinct()) {
         val model = rawModel.removePrefix("models/")
@@ -780,15 +1076,20 @@ suspend fun queryGeminiAutoDiscover(prompt: String, apiKey: String, language: Ap
             }
 
             val payload = JSONObject().apply {
-                val contents = JSONArray().apply {
-                    val contentObj = JSONObject().apply {
-                        val parts = JSONArray().apply {
-                            put(JSONObject().apply { put("text", "$systemInstruction\n\nUser: $prompt") })
-                        }
-                        put("parts", parts)
-                    }
-                    put(contentObj)
+                val contents = JSONArray()
+                // Multi-Turn Chat History Array
+                for (turn in chatHistory) {
+                    contents.put(JSONObject().apply {
+                        put("role", turn.first)
+                        put("parts", JSONArray().put(JSONObject().put("text", turn.second)))
+                    })
                 }
+                // Append current user turn
+                contents.put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray().put(JSONObject().put("text", "$systemInstruction\n\nUser: $prompt")))
+                })
+
                 put("contents", contents)
                 put("generationConfig", JSONObject().apply {
                     put("maxOutputTokens", 120)
@@ -811,6 +1112,9 @@ suspend fun queryGeminiAutoDiscover(prompt: String, apiKey: String, language: Ap
                         val text = parts.getJSONObject(0).optString("text", "")
                         if (text.isNotEmpty()) {
                             activeWorkingModel = model
+                            // Save to multi-turn memory
+                            chatHistory.add("user" to prompt)
+                            chatHistory.add("model" to text.trim())
                             return@withContext text.trim()
                         }
                     }
@@ -818,15 +1122,12 @@ suspend fun queryGeminiAutoDiscover(prompt: String, apiKey: String, language: Ap
             } else {
                 val err = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
                 if (err.contains("API_KEY_INVALID") || err.contains("ACCESS_TOKEN_TYPE_UNSUPPORTED")) {
-                    return@withContext "API key expired or invalid. Tap 🔑 KEY to paste a fresh Google key, sir."
+                    return@withContext "API key is invalid. Please tap 🔑 KEY and paste a fresh Google key, sir."
                 }
-                lastError = "[${conn.responseCode}]: $err"
             }
-        } catch (e: Exception) {
-            lastError = e.localizedMessage ?: "Timeout"
-        }
+        } catch (_: Exception) {}
     }
-    return@withContext "Google servers are experiencing a brief spike ($lastError). Please give me another try, sir."
+    return@withContext "I'm having a brief connection hiccup. Please ask again, sir."
 }
 
 fun fetchAvailableModelsFromGoogle(apiKey: String): List<String> {
