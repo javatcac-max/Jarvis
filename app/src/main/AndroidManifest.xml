@@ -4,6 +4,9 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FLASHLIGHT" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-feature android:name="android.hardware.camera.flash" android:required="false" />
 
     <queries>
@@ -31,7 +34,7 @@
             </intent-filter>
         </activity>
 
-        <!-- Accessibility Service for Full Device Control -->
+        <!-- System Accessibility Service for Device Control -->
         <service
             android:name=".JarvisAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
@@ -43,6 +46,11 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
+        <!-- Floating Mini-Orb Overlay Service -->
+        <service
+            android:name=".JarvisFloatingService"
+            android:exported="false" />
 
     </application>
 
