@@ -107,9 +107,6 @@ enum class AppLanguage(val label: String, val locale: Locale, val tag: String, v
 var activeWorkingModel: String? = null
 val chatHistory = mutableListOf<Pair<String, String>>()
 
-// -------------------------------------------------------------
-// SYSTEM ACCESSIBILITY CONTROLLER (Full Device Automation)
-// -------------------------------------------------------------
 class JarvisAccessibilityService : AccessibilityService() {
     companion object {
         var instance: JarvisAccessibilityService? = null
@@ -130,9 +127,6 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 }
 
-// -------------------------------------------------------------
-// FLOATING MINI-ORB OVERLAY SERVICE
-// -------------------------------------------------------------
 class JarvisFloatingService : Service() {
     private var windowManager: WindowManager? = null
     private var floatingView: View? = null
@@ -217,9 +211,6 @@ class JarvisFloatingService : Service() {
     }
 }
 
-// -------------------------------------------------------------
-// MAIN ACTIVITY
-// -------------------------------------------------------------
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     private var speechRecognizer: SpeechRecognizer? = null
@@ -301,6 +292,7 @@ fun JarvisMainScreen(
     var showKeyDialog by remember { mutableStateOf(apiKey.isEmpty()) }
     var tempKeyInput by remember { mutableStateOf(apiKey) }
 
+    var hapticsEnabled by remember { mutableStateOf(prefs.getBoolean("haptics_enabled", true)) }
     var selectedLanguage by remember { mutableStateOf(AppLanguage.ENGLISH) }
     var isListening by remember { mutableStateOf(false) }
     var isThinking by remember { mutableStateOf(false) }
@@ -311,21 +303,22 @@ fun JarvisMainScreen(
 
     val coroutineScope = rememberCoroutineScope()
 
-    fun triggerHapticClick() {
+    fun triggerHaptic(duration: Long = 35) {
+        if (!hapticsEnabled) return
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
-                vibratorManager?.defaultVibrator?.vibrate(VibrationEffect.createOneShot(35, VibrationEffect.DEFAULT_AMPLITUDE))
+                val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                vm?.defaultVibrator?.vibrate(VibrationEffect.createOneShot(duration, VibrationEffect.DEFAULT_AMPLITUDE))
             } else {
                 @Suppress("DEPRECATION")
-                val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-                vibrator?.vibrate(35)
+                val v = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                v?.vibrate(duration)
             }
         } catch (_: Exception) {}
     }
 
     fun startVoiceSession() {
-        triggerHapticClick()
+        triggerHaptic(40)
         liveTranscription = ""
         statusText = "LISTENING..."
         isListening = true
@@ -344,7 +337,7 @@ fun JarvisMainScreen(
                 isListening = false
 
                 coroutineScope.launch {
-                    val reply = processEverything(context, prefs, finalResult, apiKey, selectedLanguage)
+                    val reply = processEverything(context, prefs, finalResult, apiKey, selectedLanguage, ::triggerHaptic)
                     isThinking = false
                     statusText = reply
                     onSpeak(reply, selectedLanguage)
@@ -368,7 +361,6 @@ fun JarvisMainScreen(
             .fillMaxSize()
             .background(Color(0xFF000000))
     ) {
-        // Top Navigation Bar
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -379,7 +371,6 @@ fun JarvisMainScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Languages
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     AppLanguage.entries.forEach { lang ->
                         val isSelected = selectedLanguage == lang
@@ -390,7 +381,7 @@ fun JarvisMainScreen(
                                     shape = RoundedCornerShape(16.dp)
                                 )
                                 .clickable {
-                                    triggerHapticClick()
+                                    triggerHaptic()
                                     selectedLanguage = lang
                                     statusText = "${lang.name} ACTIVE"
                                 }
@@ -407,14 +398,13 @@ fun JarvisMainScreen(
                     }
                 }
 
-                // Top Controls: Accessibility + Key
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     val isAccessActive = JarvisAccessibilityService.isEnabled()
                     Box(
                         modifier = Modifier
                             .background(if (isAccessActive) Color(0xFF1B3820) else Color(0xFF382020), RoundedCornerShape(16.dp))
                             .clickable {
-                                triggerHapticClick()
+                                triggerHaptic()
                                 val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
                                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
                                 }
@@ -435,7 +425,7 @@ fun JarvisMainScreen(
                         modifier = Modifier
                             .background(Color(0xFF1A1A1A), RoundedCornerShape(16.dp))
                             .clickable {
-                                triggerHapticClick()
+                                triggerHaptic()
                                 showKeyDialog = true
                             }
                             .padding(horizontal = 10.dp, vertical = 6.dp)
@@ -452,7 +442,6 @@ fun JarvisMainScreen(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Sub-Bar: Floating Orb Toggle & Clear Memory
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -463,7 +452,7 @@ fun JarvisMainScreen(
                     modifier = Modifier
                         .background(if (isFloatingActive) Color(0xFF1B2B38) else Color(0xFF161616), RoundedCornerShape(14.dp))
                         .clickable {
-                            triggerHapticClick()
+                            triggerHaptic()
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(context)) {
                                 val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}")).apply {
                                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -479,7 +468,7 @@ fun JarvisMainScreen(
                                 }
                             }
                         }
-                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
                 ) {
                     Text(
                         text = if (isFloatingActive) "⚪ MINI-ORB ON" else "⚫ MINI-ORB OFF",
@@ -489,20 +478,40 @@ fun JarvisMainScreen(
                     )
                 }
 
-                // Clear Conversation History
+                // Vibration / Haptics Toggle
+                Box(
+                    modifier = Modifier
+                        .background(if (hapticsEnabled) Color(0xFF282818) else Color(0xFF161616), RoundedCornerShape(14.dp))
+                        .clickable {
+                            hapticsEnabled = !hapticsEnabled
+                            prefs.edit().putBoolean("haptics_enabled", hapticsEnabled).apply()
+                            triggerHaptic(60)
+                            statusText = if (hapticsEnabled) "HAPTICS ENABLED" else "HAPTICS DISABLED"
+                        }
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                ) {
+                    Text(
+                        text = if (hapticsEnabled) "📳 HAPTICS ON" else "📴 HAPTICS OFF",
+                        color = if (hapticsEnabled) Color(0xFFFFDD44) else Color(0xFF666666),
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+
+                // Clear Memory
                 if (chatHistory.isNotEmpty()) {
                     Box(
                         modifier = Modifier
                             .background(Color(0xFF1C1C1C), RoundedCornerShape(14.dp))
                             .clickable {
-                                triggerHapticClick()
+                                triggerHaptic()
                                 chatHistory.clear()
                                 statusText = "CONVERSATION MEMORY CLEARED"
                             }
                             .padding(horizontal = 10.dp, vertical = 5.dp)
                     ) {
                         Text(
-                            text = "🔄 RESET MEMORY",
+                            text = "🔄 RESET",
                             color = Color(0xFFAAAAAA),
                             fontSize = 10.sp,
                             fontFamily = FontFamily.Monospace
@@ -522,7 +531,7 @@ fun JarvisMainScreen(
                 isThinking = isThinking,
                 rmsLevel = rmsLevel,
                 onClick = {
-                    triggerHapticClick()
+                    triggerHaptic()
                     if (isListening) {
                         speechRecognizer.stopListening()
                         isListening = false
@@ -587,7 +596,7 @@ fun JarvisMainScreen(
             },
             text = {
                 Column {
-                    Text("Paste your key below. Saved safely on your device:", color = Color(0xFFAAAAAA), fontSize = 12.sp)
+                    Text("Paste your key from aistudio.google.com below:", color = Color(0xFFAAAAAA), fontSize = 12.sp)
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedTextField(
                         value = tempKeyInput,
@@ -625,27 +634,34 @@ fun JarvisMainScreen(
 }
 
 // -------------------------------------------------------------
-// MASTER COMMAND ROUTER (ALL NEW POWERS INCLUDED)
+// UNIFIED MASTER ROUTER
 // -------------------------------------------------------------
 suspend fun processEverything(
     context: Context,
     prefs: SharedPreferences,
     query: String,
     apiKey: String,
-    language: AppLanguage
+    language: AppLanguage,
+    onHaptic: (Long) -> Unit
 ): String = withContext(Dispatchers.IO) {
     val q = query.lowercase().trim()
     val access = JarvisAccessibilityService.instance
+
+    // VIBRATION DIAGNOSTIC / TEST
+    if (q.contains("test vibration") || q.contains("vibrate phone") || q == "vibrate") {
+        onHaptic(100)
+        kotlinx.coroutines.delay(150)
+        onHaptic(100)
+        kotlinx.coroutines.delay(150)
+        onHaptic(150)
+        return@withContext "Haptic diagnostic sequence complete, sir."
+    }
 
     // 1. HARDWARE: LOCK SCREEN
     if (q.contains("lock") || q.contains("लक") || q.contains("स्क्रीन बंद")) {
         if (access != null) {
             access.performGlobalAction(AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN)
-            return@withContext when (language) {
-                AppLanguage.ENGLISH -> "Locking your device right now, sir."
-                AppLanguage.NEPALI -> "फोन लक गर्दै छु, हजुर।"
-                AppLanguage.HINDI -> "डिवाइस लॉक किया जा रहा है।"
-            }
+            return@withContext "Locking your device, sir."
         } else {
             return@withContext "Please tap '⚠️ ACCESS' at the top to enable screen control, sir."
         }
@@ -661,7 +677,16 @@ suspend fun processEverything(
         }
     }
 
-    // 3. HARDWARE: ALARMS & TIMERS
+    // 3. GLYPH LIGHT / FLASHLIGHT
+    if (q.contains("glyph") || q.contains("flashlight") || q.contains("torch") || q.contains("बत्ती") || q.contains("टर्च") || q.contains("टॉर्च")) {
+        val turnOn = q.contains("on") || q.contains("बाल") || q.contains("चालू") || q.contains("जला")
+        val success = toggleFlashlight(context, turnOn)
+        if (success) {
+            return@withContext if (turnOn) "Glyph light illuminated, sir." else "Glyph light turned off, sir."
+        }
+    }
+
+    // 4. ALARMS & TIMERS
     if (q.contains("alarm") || q.contains("अलार्म")) {
         val alarmSet = setSystemAlarm(context, q)
         if (alarmSet != null) return@withContext alarmSet
@@ -671,10 +696,10 @@ suspend fun processEverything(
         if (timerSet != null) return@withContext timerSet
     }
 
-    // 4. HARDWARE: MUSIC / MEDIA CONTROLS
+    // 5. MEDIA CONTROLS
     if (q.contains("play music") || q.contains("resume music") || q == "play") {
         controlMedia(context, KeyEvent.KEYCODE_MEDIA_PLAY)
-        return@withContext "Playing music, sir."
+        return@withContext "Resuming music playback, sir."
     }
     if (q.contains("pause music") || q.contains("stop music") || q == "pause" || q.contains("बन्द गर")) {
         controlMedia(context, KeyEvent.KEYCODE_MEDIA_PAUSE)
@@ -682,14 +707,14 @@ suspend fun processEverything(
     }
     if (q.contains("next song") || q.contains("next track") || q == "next") {
         controlMedia(context, KeyEvent.KEYCODE_MEDIA_NEXT)
-        return@withContext "Playing next track, sir."
+        return@withContext "Skipping to next track, sir."
     }
     if (q.contains("previous song") || q == "previous") {
         controlMedia(context, KeyEvent.KEYCODE_MEDIA_PREVIOUS)
         return@withContext "Playing previous track, sir."
     }
 
-    // 5. LOCAL PERSONAL MEMORY VAULT (Remember facts / Read facts)
+    // 6. PERSONAL MEMORY VAULT
     if (q.startsWith("remember that ") || q.startsWith("remember ")) {
         val fact = q.removePrefix("remember that ").removePrefix("remember ").trim()
         val existing = prefs.getString("memory_notes", "") ?: ""
@@ -700,13 +725,13 @@ suspend fun processEverything(
     if (q.contains("what do you remember") || q.contains("read my notes") || q.contains("where is my") || q.contains("where are my")) {
         val memory = prefs.getString("memory_notes", "") ?: ""
         if (memory.isNotEmpty()) {
-            return@withContext "Here is what I have stored in your memory vault, sir: $memory"
+            return@withContext "Here is what I have stored in your memory vault: $memory"
         } else {
             return@withContext "Your memory vault is currently empty, sir."
         }
     }
 
-    // 6. PHONE CALLING & WHATSAPP
+    // 7. PHONE CALLING & WHATSAPP
     if (q.startsWith("call ") || q.startsWith("phone ")) {
         val target = q.removePrefix("call ").removePrefix("phone ").trim()
         val digits = target.filter { it.isDigit() }
@@ -732,7 +757,7 @@ suspend fun processEverything(
         } catch (_: Exception) {}
     }
 
-    // 7. HARDWARE: NAVIGATION
+    // 8. NAVIGATION
     if (q.contains("go home") || q.contains("home screen")) {
         access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
         return@withContext "Navigating to home screen, sir."
@@ -746,7 +771,7 @@ suspend fun processEverything(
         return@withContext "Showing recent applications, sir."
     }
 
-    // 8. HARDWARE: NOTIFICATIONS & QUICK SETTINGS
+    // 9. NOTIFICATIONS & QUICK SETTINGS
     if (q.contains("notifications") || q.contains("notification")) {
         access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS)
         return@withContext "Opening notification panel, sir."
@@ -756,7 +781,7 @@ suspend fun processEverything(
         return@withContext "Opening quick settings, sir."
     }
 
-    // 9. HARDWARE: VOLUME CONTROL
+    // 10. VOLUME CONTROL
     if (q.contains("volume") || q.contains("आवाज") || q.contains("ध्वनि")) {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         return@withContext when {
@@ -776,7 +801,7 @@ suspend fun processEverything(
         }
     }
 
-    // 10. INSTANT CLOCK & DATE
+    // 11. TIME & DATE
     if (q.contains("time") || q.contains("समय") || q.contains("बजे")) {
         val sdf = SimpleDateFormat("hh:mm a", Locale.getDefault())
         val timeStr = sdf.format(Date())
@@ -788,21 +813,12 @@ suspend fun processEverything(
         return@withContext "Today is $dateStr, sir."
     }
 
-    // 11. HARDWARE: FLASHLIGHT
-    if (q.contains("flashlight") || q.contains("torch") || q.contains("बत्ती") || q.contains("टर्च") || q.contains("टॉर्च") || q.contains("फ्लैशलाइट")) {
-        val turnOn = q.contains("on") || q.contains("बाल") || q.contains("चालू") || q.contains("जला")
-        val success = toggleFlashlight(context, turnOn)
-        if (success) {
-            return@withContext if (turnOn) "Right away, sir. Flashlight is on." else "Flashlight turned off, sir."
-        }
-    }
-
-    // 12. HARDWARE: SYSTEM STATUS
+    // 12. SYSTEM STATUS
     if (q.contains("status") || q.contains("battery") || q.contains("ब्याट्री") || q.contains("बैटरी") || q.contains("सिस्टम")) {
         return@withContext getDeviceStatus(context, language)
     }
 
-    // 13. HARDWARE: UNIVERSAL APP LAUNCHER
+    // 13. UNIVERSAL APP LAUNCHER
     if (q.startsWith("open ") || q.startsWith("launch ") || q.contains(" खोल") || q.contains(" खोल्नुहोस्")) {
         val launchMsg = launchAnyApp(context, q, language)
         if (launchMsg != null) return@withContext launchMsg
@@ -821,30 +837,25 @@ suspend fun processEverything(
         if (wikiAnswer != null) return@withContext wikiAnswer
     }
 
-    // 16. GEMINI MULTI-TURN CONVERSATION MEMORY BRAIN
+    // 16. GEMINI MULTI-TURN AI BRAIN
     if (apiKey.isNotEmpty()) {
         return@withContext queryGeminiWithMemory(query, apiKey, language)
     }
 
-    return@withContext "Please tap 🔑 KEY and paste your Gemini key to chat with AI."
+    return@withContext "Please tap 🔑 KEY and paste a fresh Google key to chat with AI, sir."
 }
 
 // -------------------------------------------------------------
-// MEDIA CONTROLS
+// MEDIA & HARDWARE HELPERS
 // -------------------------------------------------------------
 fun controlMedia(context: Context, keyCode: Int) {
     try {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val eventDown = KeyEvent(KeyEvent.ACTION_DOWN, keyCode)
-        val eventUp = KeyEvent(KeyEvent.ACTION_UP, keyCode)
-        am.dispatchMediaKeyEvent(eventDown)
-        am.dispatchMediaKeyEvent(eventUp)
+        am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+        am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
     } catch (_: Exception) {}
 }
 
-// -------------------------------------------------------------
-// ALARMS & TIMERS
-// -------------------------------------------------------------
 fun setSystemAlarm(context: Context, query: String): String? {
     try {
         val digits = query.filter { it.isDigit() || it == ':' || it == ' ' }.trim()
@@ -891,9 +902,6 @@ fun setSystemTimer(context: Context, query: String): String? {
     } catch (_: Exception) { return null }
 }
 
-// -------------------------------------------------------------
-// FLASHLIGHT & DEVICE STATUS
-// -------------------------------------------------------------
 fun toggleFlashlight(context: Context, turnOn: Boolean): Boolean {
     return try {
         val cm = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -912,12 +920,9 @@ fun getDeviceStatus(context: Context, language: AppLanguage): String {
     val status = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
     val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
 
-    return "All systems nominal, sir. Your battery is at $pct percent and ${if (isCharging) "charging nicely" else "running on battery"}. Neural cores fully operational."
+    return "All systems nominal, sir. Your battery is at $pct percent and ${if (isCharging) "charging nicely" else "running on battery"}. Neural cores fully active."
 }
 
-// -------------------------------------------------------------
-// UNIVERSAL APP LAUNCHER
-// -------------------------------------------------------------
 fun launchAnyApp(context: Context, query: String, language: AppLanguage): String? {
     val cleanTarget = query.lowercase().replace("open", "").replace("launch", "").replace("खोल", "").trim()
     val pm = context.packageManager
@@ -946,9 +951,6 @@ fun launchAnyApp(context: Context, query: String, language: AppLanguage): String
     return null
 }
 
-// -------------------------------------------------------------
-// LIVE WEATHER
-// -------------------------------------------------------------
 fun fetchLiveWeather(language: AppLanguage): String? {
     return try {
         var lat = 26.72
@@ -991,9 +993,6 @@ fun fetchLiveWeather(language: AppLanguage): String? {
     } catch (_: Exception) { null }
 }
 
-// -------------------------------------------------------------
-// WIKIPEDIA
-// -------------------------------------------------------------
 fun extractWikiTopic(query: String): String {
     return query
         .replace("who was", "", ignoreCase = true)
@@ -1037,12 +1036,12 @@ fun fetchWikipediaSummary(topic: String, language: AppLanguage): String? {
 }
 
 // -------------------------------------------------------------
-// GEMINI MULTI-TURN CONVERSATION BRAIN
+// BULLETPROOF MULTI-TURN GEMINI BRAIN
 // -------------------------------------------------------------
 suspend fun queryGeminiWithMemory(prompt: String, apiKey: String, language: AppLanguage): String = withContext(Dispatchers.IO) {
     val cleanKey = apiKey.trim()
     val systemInstruction = when (language) {
-        AppLanguage.ENGLISH -> "You are JARVIS, a sophisticated, warm personal AI companion with subtle British wit. Speak like a living human companion. Keep responses brief (1 to 2 spoken sentences max). Never use asterisks or markdown formatting."
+        AppLanguage.ENGLISH -> "You are JARVIS, a sophisticated personal AI companion with subtle British wit. Speak like a living human companion. Keep answers brief (1 to 2 spoken sentences). Never use markdown or asterisks."
         AppLanguage.NEPALI -> "तपाईं JARVIS हुनुहुन्छ—एक आत्मीय, बुद्धिमान र विनम्र व्यक्तिगत AI। एक सहयोगी मित्र जस्तै स्वाभाविक र न्यानो भाषामा बोल्नुहोस्। उत्तर १ वा २ वाक्यमा छोटो र प्रष्ट दिनुहोस्। नेपाली देवनागरीमा मात्र लेख्नुहोस्।"
         AppLanguage.HINDI -> "आप JARVIS हैं—एक समझदार, विनम्र और मित्रवत AI साथी। इंसान की तरह सहज भाव से बात करें। उत्तर 1 या 2 वाक्यों में संक्षिप्त और स्पष्ट दें। हिन्दी देवनागरी में लिखें।"
     }
@@ -1056,11 +1055,12 @@ suspend fun queryGeminiWithMemory(prompt: String, apiKey: String, language: AppL
         candidateModels.addAll(listOf("gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite"))
     }
 
-    // Keep conversation memory bounded (last 6 exchanges)
     if (chatHistory.size > 8) {
         chatHistory.removeAt(0)
         chatHistory.removeAt(0)
     }
+
+    var lastError = ""
 
     for (rawModel in candidateModels.distinct()) {
         val model = rawModel.removePrefix("models/")
@@ -1076,23 +1076,25 @@ suspend fun queryGeminiWithMemory(prompt: String, apiKey: String, language: AppL
             }
 
             val payload = JSONObject().apply {
+                put("system_instruction", JSONObject().apply {
+                    put("parts", JSONArray().put(JSONObject().put("text", systemInstruction)))
+                })
+
                 val contents = JSONArray()
-                // Multi-Turn Chat History Array
                 for (turn in chatHistory) {
                     contents.put(JSONObject().apply {
                         put("role", turn.first)
                         put("parts", JSONArray().put(JSONObject().put("text", turn.second)))
                     })
                 }
-                // Append current user turn
                 contents.put(JSONObject().apply {
                     put("role", "user")
-                    put("parts", JSONArray().put(JSONObject().put("text", "$systemInstruction\n\nUser: $prompt")))
+                    put("parts", JSONArray().put(JSONObject().put("text", prompt)))
                 })
 
                 put("contents", contents)
                 put("generationConfig", JSONObject().apply {
-                    put("maxOutputTokens", 120)
+                    put("maxOutputTokens", 140)
                     put("temperature", 0.75)
                 })
             }
@@ -1101,7 +1103,8 @@ suspend fun queryGeminiWithMemory(prompt: String, apiKey: String, language: AppL
                 os.write(payload.toString().toByteArray(Charsets.UTF_8))
             }
 
-            if (conn.responseCode == 200) {
+            val code = conn.responseCode
+            if (code == 200) {
                 val resp = conn.inputStream.bufferedReader().use { it.readText() }
                 val root = JSONObject(resp)
                 val candidates = root.optJSONArray("candidates")
@@ -1112,7 +1115,6 @@ suspend fun queryGeminiWithMemory(prompt: String, apiKey: String, language: AppL
                         val text = parts.getJSONObject(0).optString("text", "")
                         if (text.isNotEmpty()) {
                             activeWorkingModel = model
-                            // Save to multi-turn memory
                             chatHistory.add("user" to prompt)
                             chatHistory.add("model" to text.trim())
                             return@withContext text.trim()
@@ -1121,13 +1123,16 @@ suspend fun queryGeminiWithMemory(prompt: String, apiKey: String, language: AppL
                 }
             } else {
                 val err = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
-                if (err.contains("API_KEY_INVALID") || err.contains("ACCESS_TOKEN_TYPE_UNSUPPORTED")) {
-                    return@withContext "API key is invalid. Please tap 🔑 KEY and paste a fresh Google key, sir."
+                if (code == 401 || err.contains("API_KEY_INVALID") || err.contains("ACCESS_TOKEN_TYPE_UNSUPPORTED")) {
+                    return@withContext "Google Error [401]: API Key expired. Please tap 🔑 KEY and paste a fresh key from aistudio.google.com, sir."
                 }
+                lastError = "[$code]: ${err.take(80)}"
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            lastError = e.localizedMessage ?: "Timeout"
+        }
     }
-    return@withContext "I'm having a brief connection hiccup. Please ask again, sir."
+    return@withContext "Google connection hiccup ($lastError). Please try once more, sir."
 }
 
 fun fetchAvailableModelsFromGoogle(apiKey: String): List<String> {
