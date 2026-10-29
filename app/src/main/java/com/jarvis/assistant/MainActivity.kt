@@ -1,6 +1,8 @@
 package com.jarvis.assistant
 
 import android.Manifest
+import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -11,10 +13,12 @@ import android.media.AudioManager
 import android.os.BatteryManager
 import android.os.Bundle
 import android.provider.MediaStore
+import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.view.accessibility.AccessibilityEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -84,6 +88,36 @@ enum class AppLanguage(val label: String, val locale: Locale, val tag: String, v
     HINDI("हिन्द", Locale("hi", "IN"), "hi-IN", "hi")
 }
 
+var activeWorkingModel: String? = null
+
+// -------------------------------------------------------------
+// SYSTEM ACCESSIBILITY CONTROLLER (Full Device Automation)
+// -------------------------------------------------------------
+class JarvisAccessibilityService : AccessibilityService() {
+    companion object {
+        var instance: JarvisAccessibilityService? = null
+        fun isEnabled(): Boolean = instance != null
+    }
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        instance = this
+        serviceInfo = AccessibilityServiceInfo().apply {
+            eventTypes = AccessibilityEvent.TYPES_ALL_MASK
+            feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
+            flags = AccessibilityServiceInfo.FLAG_DEFAULT or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+        }
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+    override fun onInterrupt() {}
+
+    override fun onDestroy() {
+        super.onDestroy()
+        instance = null
+    }
+}
+
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     private var speechRecognizer: SpeechRecognizer? = null
@@ -118,8 +152,6 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private fun tuneJarvisVoice(tts: TextToSpeech?, language: AppLanguage) {
         tts?.let { engine ->
             engine.language = language.locale
-
-            // Automatically pick the highest-fidelity, most natural voice available
             try {
                 val availableVoices = engine.voices
                 if (availableVoices != null) {
@@ -131,15 +163,12 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                          v.name.contains("en-gb", ignoreCase = true))
                     } ?: availableVoices.firstOrNull { v -> v.locale.language == language.locale.language }
 
-                    if (naturalVoice != null) {
-                        engine.voice = naturalVoice
-                    }
+                    if (naturalVoice != null) engine.voice = naturalVoice
                 }
             } catch (_: Exception) {}
 
-            // Human Touch Acoustics: Deeper pitch + calm, conversational cadence
-            engine.setPitch(0.92f)      // Deeper, calm, sophisticated tone
-            engine.setSpeechRate(1.02f) // Smooth, natural rhythm
+            engine.setPitch(0.92f)
+            engine.setSpeechRate(1.02f)
         }
     }
 
@@ -256,22 +285,46 @@ fun JarvisMainScreen(
                 }
             }
 
-            Box(
-                modifier = Modifier
-                    .background(Color(0xFF1A1A1A), RoundedCornerShape(16.dp))
-                    .clickable { showKeyDialog = true }
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
-            ) {
-                Text(
-                    text = if (apiKey.isEmpty()) "⚠️ SET KEY" else "🔑 KEY",
-                    color = if (apiKey.isEmpty()) Color(0xFFFF5555) else Color(0xFFE0E0E0),
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace
-                )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                // Accessibility Status Pill
+                val isAccessActive = JarvisAccessibilityService.isEnabled()
+                Box(
+                    modifier = Modifier
+                        .background(if (isAccessActive) Color(0xFF1B3820) else Color(0xFF382020), RoundedCornerShape(16.dp))
+                        .clickable {
+                            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            }
+                            context.startActivity(intent)
+                        }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = if (isAccessActive) "⚡ FULL ACCESS" else "⚠️ ACCESSIBILITY",
+                        color = if (isAccessActive) Color(0xFF00FF88) else Color(0xFFFF7777),
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .background(Color(0xFF1A1A1A), RoundedCornerShape(16.dp))
+                        .clickable { showKeyDialog = true }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = if (apiKey.isEmpty()) "⚠️ SET KEY" else "🔑 KEY",
+                        color = if (apiKey.isEmpty()) Color(0xFFFF5555) else Color(0xFFE0E0E0),
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
             }
         }
 
-        // Center: Glowing Smoky Orb
+        // Center: Living Smoky Orb
         Column(
             modifier = Modifier.align(Alignment.Center),
             horizontalAlignment = Alignment.CenterHorizontally
@@ -362,6 +415,7 @@ fun JarvisMainScreen(
                         val cleaned = tempKeyInput.trim()
                         apiKey = cleaned
                         prefs.edit().putString("gemini_api_key", cleaned).apply()
+                        activeWorkingModel = null
                         showKeyDialog = false
                         statusText = "KEY CONNECTED! TAP TO START"
                     },
@@ -382,7 +436,7 @@ fun JarvisMainScreen(
 }
 
 // -------------------------------------------------------------
-// UNIFIED INTELLIGENCE ROUTER
+// UNIFIED MASTER INTELLIGENCE ROUTER (Accessibility & Hardware)
 // -------------------------------------------------------------
 suspend fun processEverything(
     context: Context,
@@ -391,8 +445,77 @@ suspend fun processEverything(
     language: AppLanguage
 ): String = withContext(Dispatchers.IO) {
     val q = query.lowercase().trim()
+    val access = JarvisAccessibilityService.instance
 
-    // 1. HARDWARE: FLASHLIGHT
+    // 1. HARDWARE: LOCK SCREEN (Accessibility Power)
+    if (q.contains("lock") || q.contains("लक") || q.contains("स्क्रीन बंद")) {
+        if (access != null) {
+            access.performGlobalAction(AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN)
+            return@withContext when (language) {
+                AppLanguage.ENGLISH -> "Locking your device right now, sir."
+                AppLanguage.NEPALI -> "फोन लक गर्दै छु, हजुर।"
+                AppLanguage.HINDI -> "डिवाइस लॉक किया जा रहा है।"
+            }
+        } else {
+            return@withContext "Please tap '⚠️ ACCESSIBILITY' at the top to enable screen control, sir."
+        }
+    }
+
+    // 2. HARDWARE: TAKE SCREENSHOT
+    if (q.contains("screenshot") || q.contains("स्क्रीनशॉट") || q.contains("स्क्रिनसट")) {
+        if (access != null) {
+            access.performGlobalAction(AccessibilityService.GLOBAL_ACTION_TAKE_SCREENSHOT)
+            return@withContext "Capturing screenshot, sir."
+        } else {
+            return@withContext "Accessibility permission required for screenshots, sir."
+        }
+    }
+
+    // 3. HARDWARE: NAVIGATION (Home / Back / Recents)
+    if (q.contains("go home") || q.contains("home screen")) {
+        access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
+        return@withContext "Navigating to home screen, sir."
+    }
+    if (q.contains("go back") || q == "back") {
+        access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+        return@withContext "Going back, sir."
+    }
+    if (q.contains("recent apps") || q.contains("recents")) {
+        access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_RECENTS)
+        return@withContext "Showing recent applications, sir."
+    }
+
+    // 4. HARDWARE: NOTIFICATIONS & QUICK SETTINGS
+    if (q.contains("notifications") || q.contains("notification")) {
+        access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS)
+        return@withContext "Opening notification panel, sir."
+    }
+    if (q.contains("quick settings") || q.contains("settings panel")) {
+        access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS)
+        return@withContext "Opening quick settings, sir."
+    }
+
+    // 5. HARDWARE: VOLUME CONTROL
+    if (q.contains("volume") || q.contains("आवाज") || q.contains("ध्वनि")) {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        return@withContext when {
+            q.contains("up") || q.contains("increase") || q.contains("बढाउ") || q.contains("बढ़ाओ") -> {
+                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
+                "Volume increased, sir."
+            }
+            q.contains("down") || q.contains("decrease") || q.contains("घटाउ") || q.contains("कम") -> {
+                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
+                "Volume decreased, sir."
+            }
+            q.contains("mute") || q.contains("silent") || q.contains("म्युट") -> {
+                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_MUTE, AudioManager.FLAG_SHOW_UI)
+                "Audio muted, sir."
+            }
+            else -> "Adjusting system volume, sir."
+        }
+    }
+
+    // 6. HARDWARE: FLASHLIGHT
     if (q.contains("flashlight") || q.contains("torch") || q.contains("बत्ती") || q.contains("टर्च") || q.contains("टॉर्च") || q.contains("फ्लैशलाइट")) {
         val turnOn = q.contains("on") || q.contains("बाल") || q.contains("चालू") || q.contains("जला")
         val success = toggleFlashlight(context, turnOn)
@@ -405,33 +528,33 @@ suspend fun processEverything(
         }
     }
 
-    // 2. HARDWARE: SYSTEM STATUS
+    // 7. HARDWARE: SYSTEM STATUS
     if (q.contains("status") || q.contains("battery") || q.contains("ब्याट्री") || q.contains("बैटरी") || q.contains("सिस्टम")) {
         return@withContext getDeviceStatus(context, language)
     }
 
-    // 3. HARDWARE: APP LAUNCHER
-    if (q.contains("open") || q.contains("launch") || q.contains("खोल") || q.contains("खोल्नुहोस्") || q.contains("खोलो")) {
+    // 8. HARDWARE: APP LAUNCHER
+    if (q.startsWith("open ") || q.startsWith("launch ") || q.contains(" खोल") || q.contains(" खोल्नुहोस्")) {
         val launchMsg = launchAppByName(context, q, language)
         if (launchMsg != null) return@withContext launchMsg
     }
 
-    // 4. LIVE WEATHER (Open-Meteo API)
+    // 9. LIVE WEATHER
     if (q.contains("weather") || q.contains("temperature") || q.contains("मौसम") || q.contains("तापक्रम") || q.contains("गर्मी") || q.contains("पानी पर्छ")) {
         val weatherInfo = fetchLiveWeather(language)
         if (weatherInfo != null) return@withContext weatherInfo
     }
 
-    // 5. WIKIPEDIA FACTUAL SUMMARY
+    // 10. WIKIPEDIA FACTUAL SUMMARY
     if (q.startsWith("who is") || q.startsWith("who was") || q.startsWith("tell me about") || q.contains("wikipedia") || q.contains("विकिपीडिया") || q.contains("को हुन्") || q.contains("बारेमा भन")) {
         val wikiTopic = extractWikiTopic(q)
         val wikiAnswer = fetchWikipediaSummary(wikiTopic, language)
         if (wikiAnswer != null) return@withContext wikiAnswer
     }
 
-    // 6. GEMINI AI: HUMAN TOUCH PERSONA
+    // 11. GEMINI AI AUTO-DISCOVERY WITH HUMAN PERSONA
     if (apiKey.isNotEmpty()) {
-        return@withContext queryGeminiHuman(query, apiKey, language)
+        return@withContext queryGeminiAutoDiscover(query, apiKey, language)
     }
 
     return@withContext "Please set your Gemini key to enable full AI conversation."
@@ -559,7 +682,7 @@ fun fetchLiveWeather(language: AppLanguage): String? {
 }
 
 // -------------------------------------------------------------
-// WIKIPEDIA LOOKUP
+// WIKIPEDIA
 // -------------------------------------------------------------
 fun extractWikiTopic(query: String): String {
     return query
@@ -607,20 +730,35 @@ fun fetchWikipediaSummary(topic: String, language: AppLanguage): String? {
 }
 
 // -------------------------------------------------------------
-// GEMINI HUMAN TOUCH PERSONA
+// GEMINI AUTO-DISCOVERY WITH HUMAN PERSONA
 // -------------------------------------------------------------
-suspend fun queryGeminiHuman(prompt: String, apiKey: String, language: AppLanguage): String = withContext(Dispatchers.IO) {
+suspend fun queryGeminiAutoDiscover(prompt: String, apiKey: String, language: AppLanguage): String = withContext(Dispatchers.IO) {
     val cleanKey = apiKey.trim()
-    
     val systemInstruction = when (language) {
-        AppLanguage.ENGLISH -> "You are JARVIS, a sophisticated, warm, and loyal personal AI with subtle British wit. Speak like a thoughtful, living human companion, not a textbook. Use natural conversational phrases like 'Certainly, sir', 'Well, allow me to explain', or 'Indeed'. Keep responses brief (1 to 2 spoken sentences max). Never use asterisks or markdown."
-        AppLanguage.NEPALI -> "तपाईं JARVIS हुनुहुन्छ—एक आत्मीय, बुद्धिमान र विनम्र व्यक्तिगत AI। रोबोट जस्तो नभई एक सहयोगी मित्र जस्तै न्यानो र स्वाभाविक आवाजमा बोल्नुहोस्। उत्तर १ वा २ वाक्यमा छोटो र प्रष्ट दिनुहोस्। नेपाली देवनागरीमा मात्र लेख्नुहोस्।"
-        AppLanguage.HINDI -> "आप JARVIS हैं—एक समझदार, विनम्र और मित्रवत AI साथी। रोबोट की तरह नहीं बल्कि एक जीवित इंसान की तरह सहज भाव से बात करें। उत्तर 1 या 2 वाक्यों में संक्षिप्त और स्पष्ट दें। हिन्दी देवनागरी में लिखें।"
+        AppLanguage.ENGLISH -> "You are JARVIS, a sophisticated, warm personal AI companion with subtle British wit. Speak like a living human companion, not a textbook. Use natural conversational phrases like 'Certainly, sir', 'Well, allow me to explain', or 'Indeed'. Keep responses brief (1 to 2 spoken sentences max). Never use asterisks or formatting."
+        AppLanguage.NEPALI -> "तपाईं JARVIS हुनुहुन्छ—एक आत्मीय, बुद्धिमान र विनम्र व्यक्तिगत AI। एक सहयोगी मित्र जस्तै स्वाभाविक र न्यानो भाषामा बोल्नुहोस्। उत्तर १ वा २ वाक्यमा छोटो र प्रष्ट दिनुहोस्। नेपाली देवनागरीमा मात्र लेख्नुहोस्।"
+        AppLanguage.HINDI -> "आप JARVIS हैं—एक समझदार, विनम्र और मित्रवत AI साथी। इंसान की तरह सहज भाव से बात करें। उत्तर 1 या 2 वाक्यों में संक्षिप्त और स्पष्ट दें। हिन्दी देवनागरी में लिखें।"
     }
 
-    val models = listOf("gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest", "gemini-2.5-flash-lite")
+    val candidateModels = mutableListOf<String>()
+    if (!activeWorkingModel.isNullOrEmpty()) {
+        candidateModels.add(activeWorkingModel!!)
+    } else {
+        val discovered = fetchAvailableModelsFromGoogle(cleanKey)
+        candidateModels.addAll(discovered)
+        candidateModels.addAll(listOf(
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-latest",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-exp",
+            "gemini-2.5-flash-lite"
+        ))
+    }
 
-    for (model in models) {
+    var lastError = ""
+
+    for (rawModel in candidateModels.distinct()) {
+        val model = rawModel.removePrefix("models/")
         try {
             val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
             val conn = (url.openConnection() as HttpURLConnection).apply {
@@ -628,8 +766,8 @@ suspend fun queryGeminiHuman(prompt: String, apiKey: String, language: AppLangua
                 setRequestProperty("Content-Type", "application/json; charset=utf-8")
                 setRequestProperty("x-goog-api-key", cleanKey)
                 doOutput = true
-                connectTimeout = 6000
-                readTimeout = 8000
+                connectTimeout = 8000
+                readTimeout = 10000
             }
 
             val payload = JSONObject().apply {
@@ -656,21 +794,70 @@ suspend fun queryGeminiHuman(prompt: String, apiKey: String, language: AppLangua
             if (conn.responseCode == 200) {
                 val resp = conn.inputStream.bufferedReader().use { it.readText() }
                 val root = JSONObject(resp)
-                val text = root.getJSONArray("candidates")
-                    .getJSONObject(0)
-                    .getJSONObject("content")
-                    .getJSONArray("parts")
-                    .getJSONObject(0)
-                    .getString("text")
-                return@withContext text.trim()
+                val candidates = root.optJSONArray("candidates")
+                if (candidates != null && candidates.length() > 0) {
+                    val content = candidates.getJSONObject(0).optJSONObject("content")
+                    val parts = content?.optJSONArray("parts")
+                    if (parts != null && parts.length() > 0) {
+                        val text = parts.getJSONObject(0).optString("text", "")
+                        if (text.isNotEmpty()) {
+                            activeWorkingModel = model
+                            return@withContext text.trim()
+                        }
+                    }
+                }
+            } else {
+                val err = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+                lastError = "[${conn.responseCode}]: $err"
             }
-        } catch (_: Exception) { continue }
+        } catch (e: Exception) {
+            lastError = e.localizedMessage ?: "Timeout"
+        }
     }
-    return@withContext "I'm having a brief connection hiccup with Google servers. Do give me another try, sir."
+    return@withContext "Google servers are experiencing a brief spike ($lastError). Please give me another try, sir."
+}
+
+fun fetchAvailableModelsFromGoogle(apiKey: String): List<String> {
+    val modelList = mutableListOf<String>()
+    try {
+        val url = URL("https://generativelanguage.googleapis.com/v1beta/models")
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            setRequestProperty("x-goog-api-key", apiKey)
+            connectTimeout = 5000
+            readTimeout = 5000
+        }
+        if (conn.responseCode == 200) {
+            val resp = conn.inputStream.bufferedReader().use { it.readText() }
+            val root = JSONObject(resp)
+            val modelsArray = root.optJSONArray("models")
+            if (modelsArray != null) {
+                for (i in 0 until modelsArray.length()) {
+                    val item = modelsArray.getJSONObject(i)
+                    val name = item.optString("name", "")
+                    val methods = item.optJSONArray("supportedGenerationMethods")
+                    var canGenerate = false
+                    if (methods != null) {
+                        for (j in 0 until methods.length()) {
+                            if (methods.optString(j) == "generateContent") canGenerate = true
+                        }
+                    }
+                    if (canGenerate) {
+                        if (name.contains("flash", ignoreCase = true)) {
+                            modelList.add(0, name)
+                        } else {
+                            modelList.add(name)
+                        }
+                    }
+                }
+            }
+        }
+    } catch (_: Exception) {}
+    return modelList
 }
 
 // -------------------------------------------------------------
-// RESPONSIVE LISTENER
+// RESPONSIVE VOICE LISTENER
 // -------------------------------------------------------------
 fun startListeningResponsive(
     context: Context,
