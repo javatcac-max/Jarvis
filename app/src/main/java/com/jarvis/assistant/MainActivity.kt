@@ -2,7 +2,6 @@ package com.jarvis.assistant
 
 import android.Manifest
 import android.accessibilityservice.AccessibilityService
-import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -102,11 +101,6 @@ class JarvisAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        serviceInfo = AccessibilityServiceInfo().apply {
-            eventTypes = AccessibilityEvent.TYPES_ALL_MASK
-            feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
-            flags = AccessibilityServiceInfo.FLAG_DEFAULT or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
-        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
@@ -157,7 +151,6 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 if (availableVoices != null) {
                     val naturalVoice = availableVoices.firstOrNull { v ->
                         v.locale.language == language.locale.language &&
-                        !v.isNetworkConnectionRequired &&
                         (v.name.contains("male", ignoreCase = true) || 
                          v.name.contains("neural", ignoreCase = true) ||
                          v.name.contains("en-gb", ignoreCase = true))
@@ -286,7 +279,6 @@ fun JarvisMainScreen(
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                // Accessibility Status Pill
                 val isAccessActive = JarvisAccessibilityService.isEnabled()
                 Box(
                     modifier = Modifier
