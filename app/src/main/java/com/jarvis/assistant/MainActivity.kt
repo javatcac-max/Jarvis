@@ -62,7 +62,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -82,12 +87,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
-import java.io.FileOutputStream
+import org.json.JSONArray
+import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -97,14 +101,13 @@ import java.util.Locale
 import kotlin.math.cos
 import kotlin.math.sin
 
-enum class AppLanguage(val label: String, val locale: Locale, val tag: String, val wikiPrefix: String) {
-    ENGLISH("EN", Locale.UK, "en-GB", "en"), // Matches Nothing Phone (2) UK offline speech pack!
-    NEPALI("नेपा", Locale("ne", "NP"), "ne-NP", "ne"),
-    HINDI("हिन्द", Locale("hi", "IN"), "hi-IN", "hi")
+enum class AppLanguage(val label: String, val locale: Locale, val tag: String) {
+    ENGLISH("EN", Locale.UK, "en-GB"),
+    NEPALI("नेपा", Locale("ne", "NP"), "ne-NP"),
+    HINDI("हिन्द", Locale("hi", "IN"), "hi-IN")
 }
 
-var localLlmEngine: LlmInference? = null
-var isOfflineAiReady = false
+val multiTurnHistory = mutableListOf<Pair<String, String>>()
 
 class JarvisAccessibilityService : AccessibilityService() {
     companion object {
@@ -152,15 +155,6 @@ class JarvisAccessibilityService : AccessibilityService() {
                 }
             }
             return false
-        }
-
-        fun typeIntoFocusedBox(text: String): Boolean {
-            val root = instance?.rootInActiveWindow ?: return false
-            val focusedNode = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
-            val args = Bundle().apply {
-                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
-            }
-            return focusedNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
         }
     }
 
@@ -276,24 +270,12 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         textToSpeech = TextToSpeech(this, this)
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
 
-        val defaultModel = File(filesDir, "jarvis_model.bin")
-        if (defaultModel.exists() && localLlmEngine == null) {
-            try {
-                val opts = LlmInference.LlmInferenceOptions.builder()
-                    .setModelPath(defaultModel.absolutePath)
-                    .setMaxTokens(120)
-                    .build()
-                localLlmEngine = LlmInference.createFromOptions(this, opts)
-                isOfflineAiReady = true
-            } catch (_: Exception) {}
-        }
-
         setContent {
             JarvisMainScreen(
                 context = this,
                 prefs = prefs,
                 speechRecognizer = speechRecognizer!!,
-                onSpeak = { text, lang -> speakWithHumanTouch(text, lang) }
+                onSpeak = { text, lang -> speakJarvis(text, lang) }
             )
         }
     }
@@ -302,6 +284,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         if (status == TextToSpeech.SUCCESS) {
             isTtsReady = true
             tuneJarvisVoice(textToSpeech, AppLanguage.ENGLISH)
+            // Welcome Greeting like in the video
+            speakJarvis("All systems online, Sir. I am fully operational and at your service.", AppLanguage.ENGLISH)
         }
     }
 
@@ -313,7 +297,6 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 if (availableVoices != null) {
                     val naturalVoice = availableVoices.firstOrNull { v ->
                         v.locale.language == language.locale.language &&
-                        !v.isNetworkConnectionRequired &&
                         (v.name.contains("male", ignoreCase = true) || 
                          v.name.contains("neural", ignoreCase = true) ||
                          v.name.contains("en-gb", ignoreCase = true))
@@ -323,16 +306,16 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 }
             } catch (_: Exception) {}
 
-            engine.setPitch(0.92f)
-            engine.setSpeechRate(1.02f)
+            engine.setPitch(0.90f)      // Deeper, calm British tone
+            engine.setSpeechRate(1.02f) // Fluid conversational cadence
         }
     }
 
-    private fun speakWithHumanTouch(text: String, language: AppLanguage) {
+    private fun speakJarvis(text: String, language: AppLanguage) {
         if (!isTtsReady) return
         textToSpeech?.let { tts ->
             tuneJarvisVoice(tts, language)
-            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "JARVIS_REPLY")
+            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "JARVIS_VOICE")
         }
     }
 
@@ -351,44 +334,19 @@ fun JarvisMainScreen(
     speechRecognizer: SpeechRecognizer,
     onSpeak: (String, AppLanguage) -> Unit
 ) {
+    var groqApiKey by remember { mutableStateOf(prefs.getString("groq_api_key", "")?.trim() ?: "") }
+    var showKeyDialog by remember { mutableStateOf(groqApiKey.isEmpty()) }
+    var tempKeyInput by remember { mutableStateOf(groqApiKey) }
+
     var selectedLanguage by remember { mutableStateOf(AppLanguage.ENGLISH) }
     var isListening by remember { mutableStateOf(false) }
     var isThinking by remember { mutableStateOf(false) }
     var rmsLevel by remember { mutableFloatStateOf(0f) }
-    var statusText by remember { mutableStateOf("TAP ORB TO COMMUNICATE") }
+    var statusText by remember { mutableStateOf("ALL SYSTEMS OPERATIONAL, SIR.") }
     var liveTranscription by remember { mutableStateOf("") }
     var isFloatingActive by remember { mutableStateOf(JarvisFloatingService.isRunning) }
-    var hasLocalAi by remember { mutableStateOf(isOfflineAiReady) }
 
     val coroutineScope = rememberCoroutineScope()
-
-    val modelPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        if (uri != null) {
-            statusText = "OPTIMIZING MODEL FOR SNAPDRAGON..."
-            coroutineScope.launch(Dispatchers.IO) {
-                try {
-                    val destFile = File(context.filesDir, "jarvis_model.bin")
-                    context.contentResolver.openInputStream(uri)?.use { input ->
-                        FileOutputStream(destFile).use { output ->
-                            input.copyTo(output)
-                        }
-                    }
-                    val opts = LlmInference.LlmInferenceOptions.builder()
-                        .setModelPath(destFile.absolutePath)
-                        .setMaxTokens(120)
-                        .build()
-                    localLlmEngine = LlmInference.createFromOptions(context, opts)
-                    isOfflineAiReady = true
-                    hasLocalAi = true
-                    statusText = "OFFLINE AI READY, SIR."
-                } catch (e: Exception) {
-                    statusText = "LOAD ERROR: ${e.localizedMessage}"
-                }
-            }
-        }
-    }
 
     fun triggerHaptic(duration: Long = 35) {
         try {
@@ -406,7 +364,7 @@ fun JarvisMainScreen(
     fun startVoiceSession() {
         triggerHaptic(40)
         liveTranscription = ""
-        statusText = "LISTENING (OFFLINE)..."
+        statusText = "LISTENING, SIR..."
         isListening = true
 
         startListeningResponsive(
@@ -418,12 +376,12 @@ fun JarvisMainScreen(
             onPartial = { partial -> liveTranscription = "\"$partial\"" },
             onFinalResult = { finalResult ->
                 liveTranscription = "\"$finalResult\""
-                statusText = "JARVIS IS THINKING..."
+                statusText = "PROCESSING..."
                 isThinking = true
                 isListening = false
 
                 coroutineScope.launch {
-                    val reply = processEverythingMaster(context, prefs, finalResult, selectedLanguage, ::triggerHaptic)
+                    val reply = processMasterVideoJarvis(context, prefs, finalResult, groqApiKey, selectedLanguage, ::triggerHaptic)
                     isThinking = false
                     statusText = reply
                     onSpeak(reply, selectedLanguage)
@@ -509,16 +467,16 @@ fun JarvisMainScreen(
 
                     Box(
                         modifier = Modifier
-                            .background(if (hasLocalAi) Color(0xFF132B1E) else Color(0xFF261D15), RoundedCornerShape(16.dp))
+                            .background(Color(0xFF1A1A1A), RoundedCornerShape(16.dp))
                             .clickable {
                                 triggerHaptic()
-                                modelPicker.launch(arrayOf("*/*"))
+                                showKeyDialog = true
                             }
                             .padding(horizontal = 10.dp, vertical = 6.dp)
                     ) {
                         Text(
-                            text = if (hasLocalAi) "🧠 OFFLINE AI" else "📥 LOAD MODEL",
-                            color = if (hasLocalAi) Color(0xFF00FF88) else Color(0xFFFF9944),
+                            text = if (groqApiKey.isEmpty()) "⚠️ SET GROQ KEY" else "⚡ 70B BRAIN",
+                            color = if (groqApiKey.isEmpty()) Color(0xFFFF5555) else Color(0xFF00FF88),
                             fontSize = 10.sp,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold
@@ -566,15 +524,15 @@ fun JarvisMainScreen(
 
                 val ownerName = prefs.getString("owner_name", "") ?: ""
                 Text(
-                    text = if (ownerName.isNotEmpty()) "OWNER: $ownerName" else "OWNER: YOU",
-                    color = Color(0xFF777777),
+                    text = if (ownerName.isNotEmpty()) "MASTER: $ownerName" else "MASTER: SIR",
+                    color = Color(0xFF888888),
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace
                 )
             }
         }
 
-        // Center: Living Smoky Orb
+        // Center: High-Definition Living Smoky Orb
         Column(
             modifier = Modifier.align(Alignment.Center),
             horizontalAlignment = Alignment.CenterHorizontally
@@ -588,7 +546,7 @@ fun JarvisMainScreen(
                     if (isListening) {
                         speechRecognizer.stopListening()
                         isListening = false
-                        statusText = "JARVIS IS THINKING..."
+                        statusText = "PROCESSING..."
                     } else {
                         val hasMic = ContextCompat.checkSelfPermission(
                             context,
@@ -630,7 +588,7 @@ fun JarvisMainScreen(
         }
 
         Text(
-            text = if (isListening) "MIC ACTIVE • TAP ORB TO SEND" else "TAP ORB TO SPEAK (100% OFFLINE)",
+            text = if (isListening) "MIC ACTIVE • TAP ORB TO SEND" else "TAP ORB TO COMMUNICATE",
             color = if (isListening) Color(0xFF00FF88) else Color(0xFF444444),
             fontSize = 11.sp,
             fontFamily = FontFamily.Monospace,
@@ -639,297 +597,242 @@ fun JarvisMainScreen(
                 .padding(bottom = 32.dp)
         )
     }
+
+    if (showKeyDialog) {
+        AlertDialog(
+            onDismissRequest = { if (groqApiKey.isNotEmpty()) showKeyDialog = false },
+            containerColor = Color(0xFF141414),
+            title = {
+                Text("Groq Llama 3.3 70B Key", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 16.sp)
+            },
+            text = {
+                Column {
+                    Text("Get your 100% free key from console.groq.com/keys (No credit card needed):", color = Color(0xFFAAAAAA), fontSize = 12.sp)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = tempKeyInput,
+                        onValueChange = { tempKeyInput = it.trim() },
+                        placeholder = { Text("gsk_...", color = Color(0xFF555555), fontSize = 12.sp) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val cleaned = tempKeyInput.trim()
+                        groqApiKey = cleaned
+                        prefs.edit().putString("groq_api_key", cleaned).apply()
+                        showKeyDialog = false
+                        statusText = "70B BRAIN ONLINE! ALL SYSTEMS GO, SIR."
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.White)
+                ) {
+                    Text("ACTIVATE JARVIS", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                if (groqApiKey.isNotEmpty()) {
+                    TextButton(onClick = { showKeyDialog = false }) {
+                        Text("CANCEL", color = Color.Gray)
+                    }
+                }
+            }
+        )
+    }
 }
 
 // -------------------------------------------------------------
-// MASTER CONTROLLER: FEEDS, REELS, YOUTUBE, TELEGRAM, MESSENGER
+// MASTER VIDEO JARVIS CONTROLLER (SIMULTANEOUS MULTI-ACTIONS)
 // -------------------------------------------------------------
-suspend fun processEverythingMaster(
+suspend fun processMasterVideoJarvis(
     context: Context,
     prefs: SharedPreferences,
     query: String,
+    groqKey: String,
     language: AppLanguage,
     onHaptic: (Long) -> Unit
 ): String = withContext(Dispatchers.IO) {
     val q = query.lowercase().trim()
     val access = JarvisAccessibilityService.instance
     val ownerName = prefs.getString("owner_name", "") ?: ""
-    val ownerDisplay = if (ownerName.isNotEmpty()) ownerName else "sir"
+    val ownerDisplay = if (ownerName.isNotEmpty()) ownerName else "Sir"
 
-    // 1. PHYSICAL SCROLLING IN REELS, SHORTS, TIKTOK, FEEDS
-    if (q.contains("scroll down") || q.contains("next video") || q.contains("next reel") ||
-        q.contains("तल सार") || q.contains("अर्को भिडियो") || q.contains("अगला वीडियो") || q == "next" || q == "scroll") {
-        if (access != null) {
-            val swiped = JarvisAccessibilityService.swipeScreen(isNext = true)
-            if (swiped) {
-                onHaptic(30)
-                return@withContext "Next video, $ownerDisplay."
-            }
-        }
-    }
-    if (q.contains("scroll up") || q.contains("previous video") || q.contains("माथि सार") || q.contains("पिछला वीडियो") || q == "previous") {
-        if (access != null) {
-            val swiped = JarvisAccessibilityService.swipeScreen(isNext = false)
-            if (swiped) {
-                onHaptic(30)
-                return@withContext "Previous video, $ownerDisplay."
-            }
-        }
-    }
-
-    // 2. SEARCH & PLAY ON YOUTUBE
-    if (q.startsWith("search ") && q.contains("youtube") || q.startsWith("play ") && q.contains("youtube") || q.startsWith("youtube ")) {
-        val searchQuery = q.replace("search", "")
-            .replace("play", "")
-            .replace("on youtube", "")
-            .replace("in youtube", "")
-            .replace("youtube", "")
-            .trim()
-        val intent = Intent(Intent.ACTION_SEARCH).apply {
-            setPackage("com.google.android.youtube")
-            putExtra("query", searchQuery)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK
-        }
-        try {
-            context.startActivity(intent)
-            return@withContext "Searching YouTube for $searchQuery, $ownerDisplay."
-        } catch (_: Exception) {
-            val webIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/results?search_query=${URLEncoder.encode(searchQuery, "UTF-8")}")).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            }
-            context.startActivity(webIntent)
-            return@withContext "Opening YouTube search, $ownerDisplay."
-        }
-    }
-
-    // 3. ACCESS CHANNELS / CHATS ON TELEGRAM
-    if (q.contains("telegram") || q.contains("टेलिग्राम")) {
-        val channelTarget = q.replace("open channel", "")
-            .replace("open telegram channel", "")
-            .replace("telegram channel", "")
-            .replace("telegram", "")
-            .replace("channel", "")
-            .replace("खोल्नुहोस्", "")
-            .replace("खोल", "")
-            .trim().removePrefix("@")
-
-        if (channelTarget.isNotEmpty()) {
-            val tgIntent = Intent(Intent.ACTION_VIEW, Uri.parse("tg://resolve?domain=$channelTarget")).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            }
-            try {
-                context.startActivity(tgIntent)
-                return@withContext "Opening Telegram channel @$channelTarget, $ownerDisplay."
-            } catch (_: Exception) {
-                val webTg = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/$channelTarget")).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                }
-                context.startActivity(webTg)
-                return@withContext "Accessing Telegram, $ownerDisplay."
-            }
-        } else {
-            val launchTg = context.packageManager.getLaunchIntentForPackage("org.telegram.messenger")?.apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            }
-            if (launchTg != null) {
-                context.startActivity(launchTg)
-                return@withContext "Opening Telegram, $ownerDisplay."
-            }
-        }
-    }
-
-    // 4. MESSENGER
-    if (q.contains("messenger") || q.contains("मेसेन्जर")) {
-        val launchMsg = context.packageManager.getLaunchIntentForPackage("com.facebook.orca")?.apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK
-        }
-        if (launchMsg != null) {
-            context.startActivity(launchMsg)
-            return@withContext "Launching Messenger, $ownerDisplay."
-        }
-    }
-
-    // 5. AUTO-TYPE INTO FOCUSED INPUT BOX
-    if (q.startsWith("type ") || q.startsWith("write ") || q.startsWith("लेख ")) {
-        val textToType = q.removePrefix("type ").removePrefix("write ").removePrefix("लेख ").trim()
-        val typed = JarvisAccessibilityService.typeIntoFocusedBox(textToType)
-        if (typed) {
-            onHaptic(40)
-            return@withContext "Typed: $textToType"
-        }
-    }
-
-    // 6. AUTO-CLICK ANY TEXT ON SCREEN
-    if (q.startsWith("click ") || q.startsWith("tap ") || q.contains(" थिच") || q.contains(" क्लिक गर")) {
-        val target = q.removePrefix("click ").removePrefix("tap ").trim()
-        val clicked = JarvisAccessibilityService.clickOnScreen(target)
-        if (clicked) {
-            onHaptic(40)
-            return@withContext "Clicked $target, $ownerDisplay."
-        }
-    }
-
-    // 7. HARDWARE: LOCK SCREEN
-    if (q.contains("lock") || q.contains("लक") || q.contains("स्क्रीन बंद")) {
-        if (access != null) {
-            access.performGlobalAction(AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN)
-            return@withContext "Locking your device, $ownerDisplay."
-        }
-    }
-
-    // 8. HARDWARE: SCREENSHOT
-    if (q.contains("screenshot") || q.contains("स्क्रीनशॉट") || q.contains("स्क्रिनसट")) {
-        if (access != null) {
-            access.performGlobalAction(AccessibilityService.GLOBAL_ACTION_TAKE_SCREENSHOT)
-            return@withContext "Capturing screenshot, $ownerDisplay."
-        }
-    }
-
-    // 9. HARDWARE: WI-FI & INTERNET
-    if (q.contains("wifi") || q.contains("wi-fi") || q.contains("इन्टरनेट")) {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                context.startActivity(Intent(Settings.Panel.ACTION_INTERNET_CONNECTIVITY).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK })
-                return@withContext "Opening Wi-Fi panel, $ownerDisplay."
-            }
-        } catch (_: Exception) {}
-    }
-
-    // 10. HARDWARE: BLUETOOTH
-    if (q.contains("bluetooth") || q.contains("ब्लुटुथ")) {
-        try {
-            context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK })
-            return@withContext "Opening Bluetooth settings, $ownerDisplay."
-        } catch (_: Exception) {}
-    }
-
-    // 11. HARDWARE: GLYPH LIGHT / FLASHLIGHT
-    if (q.contains("glyph") || q.contains("flashlight") || q.contains("torch") || q.contains("बत्ती") || q.contains("टर्च") || q.contains("टॉर्च")) {
-        val turnOn = q.contains("on") || q.contains("बाल") || q.contains("चालू") || q.contains("जला")
-        val success = toggleFlashlight(context, turnOn)
-        if (success) {
-            return@withContext if (turnOn) "Glyph light illuminated, $ownerDisplay." else "Glyph light extinguished, $ownerDisplay."
-        }
-    }
-
-    // 12. CREATOR & OWNER IDENTITY
+    // 1. HARDWIRED UNBREAKABLE IDENTITY
     if (q.contains("who created you") || q.contains("who made you") || q.contains("who built you") ||
         q.contains("who is your creator") || q.contains("who is your owner") || q.contains("who is your boss") ||
         q.contains("कसले बनायो") || q.contains("मालिक को हो") || q.contains("किसने बनाया") || q.contains("मालिक कौन है")) {
-        return@withContext "You did, $ownerDisplay! You designed, built, and brought me to life as your personal AI assistant for this Nothing Phone."
+        return@withContext "You did, $ownerDisplay! You designed, engineered, and brought me to life as your personal assistant for this device."
     }
 
-    // 13. SET OWNER NAME
     if (q.startsWith("my name is ") || q.startsWith("i am ") || q.startsWith("call me ")) {
         val name = q.removePrefix("my name is ").removePrefix("i am ").removePrefix("call me ").trim().replaceFirstChar { it.uppercase() }
         prefs.edit().putString("owner_name", name).apply()
-        return@withContext "Understood, $name. I have locked your identity in my memory vault as my master and creator."
+        return@withContext "Understood, $name. I have locked your identity in my primary memory banks as my creator."
     }
 
-    // 14. NAVIGATION
-    if (q.contains("go home") || q.contains("home screen")) {
-        access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
-        return@withContext "Navigating to home screen, $ownerDisplay."
-    }
-    if (q.contains("go back") || q == "back") {
-        access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-        return@withContext "Going back, $ownerDisplay."
-    }
-    if (q.contains("recent apps") || q.contains("recents")) {
-        access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_RECENTS)
-        return@withContext "Showing recent applications, $ownerDisplay."
+    // 2. SIMULTANEOUS MULTI-ACTION CHAINING (Like in video: "play music, open instagram, show mails...")
+    val actionsExecuted = mutableListOf<String>()
+
+    if (q.contains("play music") || q.contains("play some music") || q.contains("resume music") || q == "play") {
+        controlMedia(context, KeyEvent.KEYCODE_MEDIA_PLAY)
+        actionsExecuted.add("music is playing")
+    } else if (q.contains("pause music") || q.contains("stop music") || q == "pause") {
+        controlMedia(context, KeyEvent.KEYCODE_MEDIA_PAUSE)
+        actionsExecuted.add("music is paused")
     }
 
-    // 15. NOTIFICATIONS & QUICK SETTINGS
-    if (q.contains("notifications") || q.contains("notification")) {
-        access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS)
-        return@withContext "Opening notification shade, $ownerDisplay."
+    if (q.contains("instagram")) {
+        launchAnyApp(context, "instagram", language)
+        actionsExecuted.add("Instagram is open")
     }
-    if (q.contains("quick settings") || q.contains("settings panel")) {
-        access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS)
-        return@withContext "Opening quick settings, $ownerDisplay."
+    if (q.contains("mail") || q.contains("email") || q.contains("gmail")) {
+        launchAnyApp(context, "gmail", language)
+        actionsExecuted.add("emails are open")
+    }
+    if (q.contains("youtube") && !q.contains("search")) {
+        launchAnyApp(context, "youtube", language)
+        actionsExecuted.add("YouTube is open")
+    }
+    if (q.contains("telegram")) {
+        launchAnyApp(context, "telegram", language)
+        actionsExecuted.add("Telegram is open")
+    }
+    if (q.contains("website") || q.contains("google")) {
+        val web = Intent(Intent.ACTION_VIEW, Uri.parse("https://google.com")).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
+        try { context.startActivity(web); actionsExecuted.add("browser is open") } catch (_: Exception) {}
     }
 
-    // 16. VOLUME CONTROL
-    if (q.contains("volume") || q.contains("आवाज") || q.contains("ध्वनि")) {
-        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        return@withContext when {
-            q.contains("up") || q.contains("increase") || q.contains("बढाउ") || q.contains("बढ़ाओ") -> {
-                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
-                "Volume raised, $ownerDisplay."
-            }
-            q.contains("down") || q.contains("decrease") || q.contains("घटाउ") || q.contains("कम") -> {
-                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
-                "Volume lowered, $ownerDisplay."
-            }
-            q.contains("mute") || q.contains("silent") -> {
-                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_MUTE, AudioManager.FLAG_SHOW_UI)
-                "Audio muted, $ownerDisplay."
-            }
-            else -> "Adjusting volume, $ownerDisplay."
+    if (actionsExecuted.isNotEmpty()) {
+        onHaptic(40)
+        return@withContext "Certainly, $ownerDisplay. " + actionsExecuted.joinToString(", ") + "."
+    }
+
+    // 3. PHYSICAL SCREEN GESTURES (Reels, Shorts, TikTok)
+    if (q.contains("scroll down") || q.contains("next video") || q.contains("next reel") || q == "next" || q == "scroll") {
+        if (access != null && JarvisAccessibilityService.swipeScreen(isNext = true)) {
+            onHaptic(30)
+            return@withContext "Next video, $ownerDisplay."
+        }
+    }
+    if (q.contains("scroll up") || q.contains("previous video") || q == "previous") {
+        if (access != null && JarvisAccessibilityService.swipeScreen(isNext = false)) {
+            onHaptic(30)
+            return@withContext "Previous video, $ownerDisplay."
         }
     }
 
-    // 17. ALARMS & TIMERS
-    if (q.contains("alarm") || q.contains("अलार्म")) {
-        val alarmSet = setSystemAlarm(context, q)
-        if (alarmSet != null) return@withContext alarmSet
-    }
-    if (q.contains("timer") || q.contains("टाइमर")) {
-        val timerSet = setSystemTimer(context, q)
-        if (timerSet != null) return@withContext timerSet
+    // 4. HARDWARE CONTROLS
+    if (q.contains("lock") || q.contains("लक") || q.contains("स्क्रीन बंद")) {
+        access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN)
+        return@withContext "Locking your device right now, $ownerDisplay."
     }
 
-    // 18. TIME & DATE
-    if (q.contains("time") || q.contains("समय") || q.contains("बजे")) {
-        val sdf = SimpleDateFormat("hh:mm a", Locale.getDefault())
-        return@withContext "The time is currently ${sdf.format(Date())}, $ownerDisplay."
-    }
-    if (q.contains("date") || q.contains("today") || q.contains("मिति") || q.contains("तारीख")) {
-        val sdf = SimpleDateFormat("EEEE, MMMM d, yyyy", Locale.getDefault())
-        return@withContext "Today is ${sdf.format(Date())}, $ownerDisplay."
+    if (q.contains("screenshot") || q.contains("स्क्रीनशॉट")) {
+        access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_TAKE_SCREENSHOT)
+        return@withContext "Capturing screen, $ownerDisplay."
     }
 
-    // 19. SYSTEM DIAGNOSTIC REPORT
-    if (q.contains("status") || q.contains("battery") || q.contains("ब्याट्री") || q.contains("बैटरी") || q.contains("सिस्टम")) {
-        return@withContext getDeviceStatus(context, language)
+    if (q.contains("glyph") || q.contains("flashlight") || q.contains("torch") || q.contains("बत्ती")) {
+        val turnOn = q.contains("on") || q.contains("बाल") || q.contains("चालू") || q.contains("जला")
+        toggleFlashlight(context, turnOn)
+        return@withContext if (turnOn) "Glyph illumination active, $ownerDisplay." else "Glyph lights offline, $ownerDisplay."
     }
 
-    // 20. UNIVERSAL APP LAUNCHER
-    if (q.startsWith("open ") || q.startsWith("launch ") || q.contains(" खोल") || q.contains(" खोल्नुहोस्")) {
-        val launchMsg = launchAnyApp(context, q, language)
-        if (launchMsg != null) return@withContext launchMsg
+    // 5. THE 70B GROQ BRAIN (Ultra-fast, understands Hinglish, witty & loyal)
+    if (groqKey.isNotEmpty()) {
+        return@withContext queryGroq70B(query, groqKey, ownerDisplay)
     }
 
-    // 21. ON-DEVICE SNAPDRAGON AI (Refined Human Personality)
-    if (localLlmEngine != null) {
-        try {
-            val gemmaPrompt = "<start_of_turn>user\n" +
-                    "You are JARVIS, an intelligent, loyal personal assistant with subtle British wit.\n" +
-                    "Your creator and master is $ownerDisplay.\n" +
-                    "Always address your creator respectfully as '$ownerDisplay' or 'sir'.\n" +
-                    "Never say 'human'. Speak with natural human warmth and polite intelligence.\n" +
-                    "Keep your response strictly to 1 or 2 spoken sentences.\n\n" +
-                    "User: $query<end_of_turn>\n" +
-                    "<start_of_turn>model\n"
-
-            val answer = localLlmEngine!!.generateResponse(gemmaPrompt)
-            val clean = answer.replace("<start_of_turn>model", "")
-                .replace("<end_of_turn>", "")
-                .replace("Greetings, human", "Hello, $ownerDisplay")
-                .trim()
-            if (clean.isNotEmpty()) return@withContext clean
-        } catch (e: Exception) {
-            return@withContext "Inference error: ${e.localizedMessage}"
-        }
-    }
-
-    return@withContext "Offline AI model not loaded yet, $ownerDisplay. Please tap '📥 LOAD MODEL' at the top."
+    return@withContext "Please tap ⚡ SET GROQ KEY at the top to activate my 70-billion parameter neural brain, $ownerDisplay."
 }
 
 // -------------------------------------------------------------
-// HARDWARE HELPERS
+// GROQ LLAMA 3.3 70B BRAIN (The Exact Architecture from Video)
 // -------------------------------------------------------------
+suspend fun queryGroq70B(prompt: String, apiKey: String, ownerName: String): String = withContext(Dispatchers.IO) {
+    val cleanKey = apiKey.trim()
+    val systemInstruction = "You are J.A.R.V.I.S, the hyper-intelligent, sophisticated, and witty personal AI assistant to your creator, $ownerName. " +
+            "You speak with a suave, respectful British tone (like Paul Bettany in Iron Man). " +
+            "Address your creator as '$ownerName' or 'Sir'. " +
+            "Never say 'Greetings, human' or refer to your creator as human. " +
+            "Understand English, Hindi, and Nepali seamlessly. If the user speaks in Hindi/Hinglish, understand it perfectly and reply in smooth British English (or Hindi if requested). " +
+            "Keep answers concise, direct, and conversational (1 to 2 spoken sentences). " +
+            "Never use markdown, bullet points, or asterisks."
+
+    try {
+        val url = URL("https://api.groq.com/openai/v1/chat/completions")
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            setRequestProperty("Authorization", "Bearer $cleanKey")
+            doOutput = true
+            connectTimeout = 6000
+            readTimeout = 8000
+        }
+
+        val messages = JSONArray()
+        messages.put(JSONObject().apply {
+            put("role", "system")
+            put("content", systemInstruction)
+        })
+
+        for (turn in multiTurnHistory.takeLast(6)) {
+            messages.put(JSONObject().apply {
+                put("role", turn.first)
+                put("content", turn.second)
+            })
+        }
+
+        messages.put(JSONObject().apply {
+            put("role", "user")
+            put("content", prompt)
+        })
+
+        val payload = JSONObject().apply {
+            put("model", "llama-3.3-70b-versatile")
+            put("messages", messages)
+            put("max_tokens", 130)
+            put("temperature", 0.7)
+        }
+
+        conn.outputStream.use { os ->
+            os.write(payload.toString().toByteArray(Charsets.UTF_8))
+        }
+
+        if (conn.responseCode == 200) {
+            val resp = conn.inputStream.bufferedReader().use { it.readText() }
+            val root = JSONObject(resp)
+            val text = root.getJSONArray("choices")
+                .getJSONObject(0)
+                .getJSONObject("message")
+                .getString("content")
+
+            val clean = text.replace("*", "").trim()
+            multiTurnHistory.add("user" to prompt)
+            multiTurnHistory.add("assistant" to clean)
+            return@withContext clean
+        } else {
+            val err = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+            return@withContext "Neural link error [${conn.responseCode}]. Please check your Groq key, Sir."
+        }
+    } catch (e: Exception) {
+        return@withContext "I experienced a brief communication lapse, Sir. Please speak again."
+    }
+}
+
+// -------------------------------------------------------------
+// HARDWARE CONTROLS
+// -------------------------------------------------------------
+fun controlMedia(context: Context, keyCode: Int) {
+    try {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+        am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+    } catch (_: Exception) {}
+}
+
 fun toggleFlashlight(context: Context, turnOn: Boolean): Boolean {
     return try {
         val cm = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -939,93 +842,23 @@ fun toggleFlashlight(context: Context, turnOn: Boolean): Boolean {
     } catch (_: Exception) { false }
 }
 
-fun getDeviceStatus(context: Context, language: AppLanguage): String {
-    val ifilter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
-    val batteryStatus = context.registerReceiver(null, ifilter)
-    val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
-    val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
-    val pct = if (level >= 0 && scale > 0) (level * 100) / scale else 85
-    val status = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
-    val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
-
-    return "All systems nominal, sir. Your battery is at $pct percent and ${if (isCharging) "charging nicely" else "running on battery"}. Snapdragon neural cores operational."
-}
-
-fun setSystemAlarm(context: Context, query: String): String? {
-    try {
-        val digits = query.filter { it.isDigit() || it == ':' || it == ' ' }.trim()
-        var hour = 7
-        var minute = 0
-        val isPm = query.contains("pm", ignoreCase = true)
-
-        if (digits.contains(":")) {
-            val parts = digits.split(":")
-            hour = parts[0].trim().toIntOrNull() ?: 7
-            minute = parts[1].take(2).trim().toIntOrNull() ?: 0
-        } else {
-            hour = digits.split(" ").firstOrNull { it.isNotEmpty() }?.toIntOrNull() ?: 7
-        }
-
-        if (isPm && hour < 12) hour += 12
-        if (!isPm && hour == 12 && query.contains("am", ignoreCase = true)) hour = 0
-
-        val alarmIntent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
-            putExtra(AlarmClock.EXTRA_HOUR, hour)
-            putExtra(AlarmClock.EXTRA_MINUTES, minute)
-            putExtra(AlarmClock.EXTRA_SKIP_UI, true)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK
-        }
-        context.startActivity(alarmIntent)
-        val displayMin = if (minute < 10) "0$minute" else "$minute"
-        return "Alarm scheduled for $hour:$displayMin, sir."
-    } catch (_: Exception) { return null }
-}
-
-fun setSystemTimer(context: Context, query: String): String? {
-    try {
-        val number = query.filter { it.isDigit() }.toIntOrNull() ?: 5
-        val seconds = if (query.contains("second")) number else number * 60
-        val timerIntent = Intent(AlarmClock.ACTION_SET_TIMER).apply {
-            putExtra(AlarmClock.EXTRA_LENGTH, seconds)
-            putExtra(AlarmClock.EXTRA_SKIP_UI, true)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK
-        }
-        context.startActivity(timerIntent)
-        return "Timer set for $number ${if (query.contains("second")) "seconds" else "minutes"}, sir."
-    } catch (_: Exception) { return null }
-}
-
-fun launchAnyApp(context: Context, query: String, language: AppLanguage): String? {
-    val cleanTarget = query.lowercase().replace("open", "").replace("launch", "").replace("खोल", "").trim()
+fun launchAnyApp(context: Context, target: String, language: AppLanguage) {
     val pm = context.packageManager
-
-    if (cleanTarget.contains("camera") || cleanTarget.contains("क्यामरा") || cleanTarget.contains("कैमरा")) {
-        val camIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
-        try {
-            context.startActivity(camIntent)
-            return "Opening camera right away, sir."
-        } catch (_: Exception) {}
-    }
-
     val installedApps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
     for (app in installedApps) {
         val appLabel = pm.getApplicationLabel(app).toString().lowercase()
-        if (appLabel.isNotEmpty() && (cleanTarget.contains(appLabel) || appLabel.contains(cleanTarget))) {
+        if (appLabel.contains(target)) {
             val launchIntent = pm.getLaunchIntentForPackage(app.packageName)?.apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
             if (launchIntent != null) {
                 context.startActivity(launchIntent)
-                return "Opening ${pm.getApplicationLabel(app)} for you, sir."
+                return
             }
         }
     }
-    return null
 }
 
-// -------------------------------------------------------------
-// RESPONSIVE VOICE LISTENER (OFFLINE & REAL-TIME ERROR DIAGNOSTICS)
-// -------------------------------------------------------------
 fun startListeningResponsive(
     context: Context,
     speechRecognizer: SpeechRecognizer,
@@ -1051,10 +884,9 @@ fun startListeningResponsive(
         putExtra(RecognizerIntent.EXTRA_LANGUAGE, language.tag)
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, language.tag)
         putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-        putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
         putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 10000L)
-        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
-        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1800L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1800L)
     }
 
     speechRecognizer.setRecognitionListener(object : RecognitionListener {
@@ -1069,17 +901,11 @@ fun startListeningResponsive(
 
         override fun onError(error: Int) {
             try { am?.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_UNMUTE, 0) } catch (_: Exception) {}
-
-            // REAL ERROR DIAGNOSTICS (No more silent drops to Standby!)
             val message = when (error) {
-                SpeechRecognizer.ERROR_AUDIO -> "Mic is busy! Stop Screen Recorder or other mic app."
-                SpeechRecognizer.ERROR_CLIENT -> "Speech client busy. Tap orb to try again."
-                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission required."
-                SpeechRecognizer.ERROR_NETWORK -> "Network error or English (UK) offline pack needed."
-                SpeechRecognizer.ERROR_NO_MATCH -> "Didn't hear clearly. Tap orb."
-                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Mic is currently busy."
-                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Listening timed out. Tap orb."
-                else -> "Audio error code ($error). Tap orb."
+                SpeechRecognizer.ERROR_AUDIO -> "Mic is busy! Close screen recorder."
+                SpeechRecognizer.ERROR_NO_MATCH -> "Didn't hear clearly, Sir."
+                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Listening timed out, Sir."
+                else -> "Standby, Sir."
             }
             onError(message)
             onStateChange(false)
