@@ -59,12 +59,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -84,11 +79,13 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -104,8 +101,8 @@ enum class AppLanguage(val label: String, val locale: Locale, val tag: String, v
     HINDI("हिन्द", Locale("hi", "IN"), "hi-IN", "hi")
 }
 
-var activeWorkingModel: String? = null
-val chatHistory = mutableListOf<Pair<String, String>>()
+var localLlmEngine: LlmInference? = null
+var isOfflineAiReady = false
 
 class JarvisAccessibilityService : AccessibilityService() {
     companion object {
@@ -225,6 +222,19 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         textToSpeech = TextToSpeech(this, this)
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
 
+        // Auto-check if local model is already saved in app storage
+        val defaultModel = File(filesDir, "jarvis_model.bin")
+        if (defaultModel.exists() && localLlmEngine == null) {
+            try {
+                val opts = LlmInference.LlmInferenceOptions.builder()
+                    .setModelPath(defaultModel.absolutePath)
+                    .setMaxTokens(150)
+                    .build()
+                localLlmEngine = LlmInference.createFromOptions(this, opts)
+                isOfflineAiReady = true
+            } catch (_: Exception) {}
+        }
+
         setContent {
             JarvisMainScreen(
                 context = this,
@@ -288,11 +298,6 @@ fun JarvisMainScreen(
     speechRecognizer: SpeechRecognizer,
     onSpeak: (String, AppLanguage) -> Unit
 ) {
-    var apiKey by remember { mutableStateOf(prefs.getString("gemini_api_key", "")?.trim() ?: "") }
-    var showKeyDialog by remember { mutableStateOf(apiKey.isEmpty()) }
-    var tempKeyInput by remember { mutableStateOf(apiKey) }
-
-    var hapticsEnabled by remember { mutableStateOf(prefs.getBoolean("haptics_enabled", true)) }
     var selectedLanguage by remember { mutableStateOf(AppLanguage.ENGLISH) }
     var isListening by remember { mutableStateOf(false) }
     var isThinking by remember { mutableStateOf(false) }
@@ -300,11 +305,40 @@ fun JarvisMainScreen(
     var statusText by remember { mutableStateOf("TAP ORB TO COMMUNICATE") }
     var liveTranscription by remember { mutableStateOf("") }
     var isFloatingActive by remember { mutableStateOf(JarvisFloatingService.isRunning) }
+    var hasLocalAi by remember { mutableStateOf(isOfflineAiReady) }
 
     val coroutineScope = rememberCoroutineScope()
 
+    // Model File Picker for Offline AI (.bin / .task)
+    val modelPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            statusText = "INSTALLING OFFLINE MODEL TO SNAPDRAGON CORE..."
+            coroutineScope.launch(Dispatchers.IO) {
+                try {
+                    val destFile = File(context.filesDir, "jarvis_model.bin")
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        FileOutputStream(destFile).use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                    val opts = LlmInference.LlmInferenceOptions.builder()
+                        .setModelPath(destFile.absolutePath)
+                        .setMaxTokens(150)
+                        .build()
+                    localLlmEngine = LlmInference.createFromOptions(context, opts)
+                    isOfflineAiReady = true
+                    hasLocalAi = true
+                    statusText = "100% OFFLINE AI ONLINE! NO INTERNET NEEDED."
+                } catch (e: Exception) {
+                    statusText = "MODEL LOAD FAILED: ${e.localizedMessage}"
+                }
+            }
+        }
+    }
+
     fun triggerHaptic(duration: Long = 35) {
-        if (!hapticsEnabled) return
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
@@ -337,7 +371,7 @@ fun JarvisMainScreen(
                 isListening = false
 
                 coroutineScope.launch {
-                    val reply = processEverything(context, prefs, finalResult, apiKey, selectedLanguage, ::triggerHaptic)
+                    val reply = processEverythingOffline(context, prefs, finalResult, selectedLanguage, ::triggerHaptic)
                     isThinking = false
                     statusText = reply
                     onSpeak(reply, selectedLanguage)
@@ -421,20 +455,22 @@ fun JarvisMainScreen(
                         )
                     }
 
+                    // 100% Offline AI Model Button (No API Key Box!)
                     Box(
                         modifier = Modifier
-                            .background(Color(0xFF1A1A1A), RoundedCornerShape(16.dp))
+                            .background(if (hasLocalAi) Color(0xFF132B1E) else Color(0xFF261D15), RoundedCornerShape(16.dp))
                             .clickable {
                                 triggerHaptic()
-                                showKeyDialog = true
+                                modelPicker.launch(arrayOf("*/*"))
                             }
                             .padding(horizontal = 10.dp, vertical = 6.dp)
                     ) {
                         Text(
-                            text = if (apiKey.isEmpty()) "⚠️ KEY" else "🔑 KEY",
-                            color = if (apiKey.isEmpty()) Color(0xFFFF5555) else Color(0xFFE0E0E0),
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace
+                            text = if (hasLocalAi) "🧠 OFFLINE AI" else "📥 LOAD MODEL",
+                            color = if (hasLocalAi) Color(0xFF00FF88) else Color(0xFFFF9944),
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold
                         )
                     }
                 }
@@ -447,7 +483,6 @@ fun JarvisMainScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Floating Overlay Pill
                 Box(
                     modifier = Modifier
                         .background(if (isFloatingActive) Color(0xFF1B2B38) else Color(0xFF161616), RoundedCornerShape(14.dp))
@@ -478,46 +513,14 @@ fun JarvisMainScreen(
                     )
                 }
 
-                // Vibration / Haptics Toggle
-                Box(
-                    modifier = Modifier
-                        .background(if (hapticsEnabled) Color(0xFF282818) else Color(0xFF161616), RoundedCornerShape(14.dp))
-                        .clickable {
-                            hapticsEnabled = !hapticsEnabled
-                            prefs.edit().putBoolean("haptics_enabled", hapticsEnabled).apply()
-                            triggerHaptic(60)
-                            statusText = if (hapticsEnabled) "HAPTICS ENABLED" else "HAPTICS DISABLED"
-                        }
-                        .padding(horizontal = 10.dp, vertical = 5.dp)
-                ) {
-                    Text(
-                        text = if (hapticsEnabled) "📳 HAPTICS ON" else "📴 HAPTICS OFF",
-                        color = if (hapticsEnabled) Color(0xFFFFDD44) else Color(0xFF666666),
-                        fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
-
-                // Clear Memory
-                if (chatHistory.isNotEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .background(Color(0xFF1C1C1C), RoundedCornerShape(14.dp))
-                            .clickable {
-                                triggerHaptic()
-                                chatHistory.clear()
-                                statusText = "CONVERSATION MEMORY CLEARED"
-                            }
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
-                    ) {
-                        Text(
-                            text = "🔄 RESET",
-                            color = Color(0xFFAAAAAA),
-                            fontSize = 10.sp,
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
-                }
+                // Display Owner Name Pill
+                val ownerName = prefs.getString("owner_name", "") ?: ""
+                Text(
+                    text = if (ownerName.isNotEmpty()) "OWNER: $ownerName" else "OWNER: YOU",
+                    color = Color(0xFF777777),
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace
+                )
             }
         }
 
@@ -577,7 +580,7 @@ fun JarvisMainScreen(
         }
 
         Text(
-            text = if (isListening) "MIC ACTIVE • TAP ORB TO SEND EARLY" else "TAP ORB TO SPEAK",
+            text = if (isListening) "MIC ACTIVE • TAP ORB TO SEND EARLY" else "TAP ORB TO SPEAK (100% OFFLINE)",
             color = if (isListening) Color(0xFF00FF88) else Color(0xFF444444),
             fontSize = 11.sp,
             fontFamily = FontFamily.Monospace,
@@ -586,107 +589,72 @@ fun JarvisMainScreen(
                 .padding(bottom = 32.dp)
         )
     }
-
-    if (showKeyDialog) {
-        AlertDialog(
-            onDismissRequest = { if (apiKey.isNotEmpty()) showKeyDialog = false },
-            containerColor = Color(0xFF141414),
-            title = {
-                Text("Google Gemini API Key", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 16.sp)
-            },
-            text = {
-                Column {
-                    Text("Paste your key from aistudio.google.com below:", color = Color(0xFFAAAAAA), fontSize = 12.sp)
-                    Spacer(modifier = Modifier.height(12.dp))
-                    OutlinedTextField(
-                        value = tempKeyInput,
-                        onValueChange = { tempKeyInput = it.trim() },
-                        placeholder = { Text("AQ... or AIza...", color = Color(0xFF555555), fontSize = 12.sp) },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        val cleaned = tempKeyInput.trim()
-                        apiKey = cleaned
-                        prefs.edit().putString("gemini_api_key", cleaned).apply()
-                        activeWorkingModel = null
-                        showKeyDialog = false
-                        statusText = "KEY CONNECTED! TAP TO START"
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.White)
-                ) {
-                    Text("SAVE KEY", color = Color.Black, fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                if (apiKey.isNotEmpty()) {
-                    TextButton(onClick = { showKeyDialog = false }) {
-                        Text("CANCEL", color = Color.Gray)
-                    }
-                }
-            }
-        )
-    }
 }
 
 // -------------------------------------------------------------
-// UNIFIED MASTER ROUTER
+// 100% OFFLINE INTELLIGENCE ROUTER (Zero API Key Needed)
 // -------------------------------------------------------------
-suspend fun processEverything(
+suspend fun processEverythingOffline(
     context: Context,
     prefs: SharedPreferences,
     query: String,
-    apiKey: String,
     language: AppLanguage,
     onHaptic: (Long) -> Unit
 ): String = withContext(Dispatchers.IO) {
     val q = query.lowercase().trim()
     val access = JarvisAccessibilityService.instance
+    val ownerName = prefs.getString("owner_name", "") ?: ""
+    val ownerDisplay = if (ownerName.isNotEmpty()) ownerName else "sir"
 
-    // VIBRATION DIAGNOSTIC / TEST
-    if (q.contains("test vibration") || q.contains("vibrate phone") || q == "vibrate") {
-        onHaptic(100)
-        kotlinx.coroutines.delay(150)
-        onHaptic(100)
-        kotlinx.coroutines.delay(150)
-        onHaptic(150)
-        return@withContext "Haptic diagnostic sequence complete, sir."
+    // 1. UNBREAKABLE CREATOR & OWNER IDENTITY (100% Offline)
+    if (q.contains("who created you") || q.contains("who made you") || q.contains("who built you") ||
+        q.contains("who is your creator") || q.contains("who is your owner") || q.contains("who is your boss") ||
+        q.contains("कसले बनायो") || q.contains("मालिक को हो") || q.contains("किसने बनाया") || q.contains("मालिक कौन है")) {
+        return@withContext when (language) {
+            AppLanguage.ENGLISH -> "You did, $ownerDisplay! You designed, built, and brought me to life as your personal AI assistant for this Nothing Phone."
+            AppLanguage.NEPALI -> "तपाईंले मलाई बनाउनुभएको हो, $ownerDisplay! म तपाईंको व्यक्तिगत एआई सहायक हुँ।"
+            AppLanguage.HINDI -> "आपने ही मुझे बनाया है, $ownerDisplay! मैं आपका निजी एआई सहायक हूँ।"
+        }
     }
 
-    // 1. HARDWARE: LOCK SCREEN
+    // 2. ENROLL OWNER NAME VIA VOICE (100% Offline)
+    if (q.startsWith("my name is ") || q.startsWith("i am ") || q.startsWith("call me ")) {
+        val name = q.removePrefix("my name is ").removePrefix("i am ").removePrefix("call me ").trim()
+            .replaceFirstChar { it.uppercase() }
+        prefs.edit().putString("owner_name", name).apply()
+        return@withContext "Understood, $name. I have locked your identity into my core memory vault as my master and creator."
+    }
+
+    // 3. HARDWARE: LOCK SCREEN
     if (q.contains("lock") || q.contains("लक") || q.contains("स्क्रीन बंद")) {
         if (access != null) {
             access.performGlobalAction(AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN)
-            return@withContext "Locking your device, sir."
+            return@withContext "Locking your device, $ownerDisplay."
         } else {
-            return@withContext "Please tap '⚠️ ACCESS' at the top to enable screen control, sir."
+            return@withContext "Please tap '⚠️ ACCESS' at the top to enable screen control, $ownerDisplay."
         }
     }
 
-    // 2. HARDWARE: TAKE SCREENSHOT
+    // 4. HARDWARE: SCREENSHOT
     if (q.contains("screenshot") || q.contains("स्क्रीनशॉट") || q.contains("स्क्रिनसट")) {
         if (access != null) {
             access.performGlobalAction(AccessibilityService.GLOBAL_ACTION_TAKE_SCREENSHOT)
-            return@withContext "Capturing screenshot, sir."
+            return@withContext "Capturing screenshot, $ownerDisplay."
         } else {
-            return@withContext "Accessibility permission required for screenshots, sir."
+            return@withContext "Accessibility permission required for screenshots, $ownerDisplay."
         }
     }
 
-    // 3. GLYPH LIGHT / FLASHLIGHT
+    // 5. HARDWARE: GLYPH LIGHT / FLASHLIGHT
     if (q.contains("glyph") || q.contains("flashlight") || q.contains("torch") || q.contains("बत्ती") || q.contains("टर्च") || q.contains("टॉर्च")) {
         val turnOn = q.contains("on") || q.contains("बाल") || q.contains("चालू") || q.contains("जला")
         val success = toggleFlashlight(context, turnOn)
         if (success) {
-            return@withContext if (turnOn) "Glyph light illuminated, sir." else "Glyph light turned off, sir."
+            return@withContext if (turnOn) "Glyph light illuminated, $ownerDisplay." else "Glyph light turned off, $ownerDisplay."
         }
     }
 
-    // 4. ALARMS & TIMERS
+    // 6. ALARMS & TIMERS
     if (q.contains("alarm") || q.contains("अलार्म")) {
         val alarmSet = setSystemAlarm(context, q)
         if (alarmSet != null) return@withContext alarmSet
@@ -696,158 +664,109 @@ suspend fun processEverything(
         if (timerSet != null) return@withContext timerSet
     }
 
-    // 5. MEDIA CONTROLS
+    // 7. MEDIA CONTROLS
     if (q.contains("play music") || q.contains("resume music") || q == "play") {
         controlMedia(context, KeyEvent.KEYCODE_MEDIA_PLAY)
-        return@withContext "Resuming music playback, sir."
+        return@withContext "Resuming music playback, $ownerDisplay."
     }
     if (q.contains("pause music") || q.contains("stop music") || q == "pause" || q.contains("बन्द गर")) {
         controlMedia(context, KeyEvent.KEYCODE_MEDIA_PAUSE)
-        return@withContext "Music paused, sir."
+        return@withContext "Music paused, $ownerDisplay."
     }
     if (q.contains("next song") || q.contains("next track") || q == "next") {
         controlMedia(context, KeyEvent.KEYCODE_MEDIA_NEXT)
-        return@withContext "Skipping to next track, sir."
-    }
-    if (q.contains("previous song") || q == "previous") {
-        controlMedia(context, KeyEvent.KEYCODE_MEDIA_PREVIOUS)
-        return@withContext "Playing previous track, sir."
+        return@withContext "Skipping to next track, $ownerDisplay."
     }
 
-    // 6. PERSONAL MEMORY VAULT
+    // 8. PERSONAL MEMORY VAULT
     if (q.startsWith("remember that ") || q.startsWith("remember ")) {
         val fact = q.removePrefix("remember that ").removePrefix("remember ").trim()
         val existing = prefs.getString("memory_notes", "") ?: ""
         val updated = if (existing.isEmpty()) fact else "$existing\n$fact"
         prefs.edit().putString("memory_notes", updated).apply()
-        return@withContext "Noted and stored in my memory vault, sir."
+        return@withContext "Noted and stored in my memory vault, $ownerDisplay."
     }
     if (q.contains("what do you remember") || q.contains("read my notes") || q.contains("where is my") || q.contains("where are my")) {
         val memory = prefs.getString("memory_notes", "") ?: ""
         if (memory.isNotEmpty()) {
             return@withContext "Here is what I have stored in your memory vault: $memory"
         } else {
-            return@withContext "Your memory vault is currently empty, sir."
+            return@withContext "Your memory vault is currently empty, $ownerDisplay."
         }
     }
 
-    // 7. PHONE CALLING & WHATSAPP
-    if (q.startsWith("call ") || q.startsWith("phone ")) {
-        val target = q.removePrefix("call ").removePrefix("phone ").trim()
-        val digits = target.filter { it.isDigit() }
-        val callIntent = if (digits.length >= 7) {
-            Intent(Intent.ACTION_DIAL, Uri.parse("tel:$digits"))
-        } else {
-            Intent(Intent.ACTION_DIAL)
-        }.apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
-        try {
-            context.startActivity(callIntent)
-            return@withContext "Opening dialer for $target, sir."
-        } catch (_: Exception) {}
-    }
-    if (q.startsWith("whatsapp ") || q.startsWith("send whatsapp")) {
-        val clean = q.removePrefix("send whatsapp to ").removePrefix("whatsapp ").trim()
-        val parts = clean.split(" message ", " text ", " ")
-        val phoneNum = parts.firstOrNull { it.filter { c -> c.isDigit() }.length >= 8 } ?: ""
-        val msg = if (parts.size > 1) clean.substringAfter(phoneNum).trim() else "Hello"
-        val waUrl = "https://api.whatsapp.com/send?phone=$phoneNum&text=${URLEncoder.encode(msg, "UTF-8")}"
-        try {
-            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(waUrl)).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK })
-            return@withContext "Launching WhatsApp, sir."
-        } catch (_: Exception) {}
-    }
-
-    // 8. NAVIGATION
-    if (q.contains("go home") || q.contains("home screen")) {
-        access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
-        return@withContext "Navigating to home screen, sir."
-    }
-    if (q.contains("go back") || q == "back") {
-        access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-        return@withContext "Going back, sir."
-    }
-    if (q.contains("recent apps") || q.contains("recents")) {
-        access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_RECENTS)
-        return@withContext "Showing recent applications, sir."
-    }
-
-    // 9. NOTIFICATIONS & QUICK SETTINGS
-    if (q.contains("notifications") || q.contains("notification")) {
-        access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS)
-        return@withContext "Opening notification panel, sir."
-    }
-    if (q.contains("quick settings") || q.contains("settings panel")) {
-        access?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS)
-        return@withContext "Opening quick settings, sir."
-    }
-
-    // 10. VOLUME CONTROL
-    if (q.contains("volume") || q.contains("आवाज") || q.contains("ध्वनि")) {
-        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        return@withContext when {
-            q.contains("up") || q.contains("increase") || q.contains("बढाउ") || q.contains("बढ़ाओ") -> {
-                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
-                "Volume increased, sir."
-            }
-            q.contains("down") || q.contains("decrease") || q.contains("घटाउ") || q.contains("कम") -> {
-                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
-                "Volume decreased, sir."
-            }
-            q.contains("mute") || q.contains("silent") || q.contains("म्युट") -> {
-                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_MUTE, AudioManager.FLAG_SHOW_UI)
-                "Audio muted, sir."
-            }
-            else -> "Adjusting system volume, sir."
-        }
-    }
-
-    // 11. TIME & DATE
+    // 9. TIME & DATE
     if (q.contains("time") || q.contains("समय") || q.contains("बजे")) {
         val sdf = SimpleDateFormat("hh:mm a", Locale.getDefault())
-        val timeStr = sdf.format(Date())
-        return@withContext "The time is currently $timeStr, sir."
+        return@withContext "The time is currently ${sdf.format(Date())}, $ownerDisplay."
     }
     if (q.contains("date") || q.contains("today") || q.contains("मिति") || q.contains("तारीख")) {
         val sdf = SimpleDateFormat("EEEE, MMMM d, yyyy", Locale.getDefault())
-        val dateStr = sdf.format(Date())
-        return@withContext "Today is $dateStr, sir."
+        return@withContext "Today is ${sdf.format(Date())}, $ownerDisplay."
     }
 
-    // 12. SYSTEM STATUS
+    // 10. SYSTEM DIAGNOSTIC REPORT
     if (q.contains("status") || q.contains("battery") || q.contains("ब्याट्री") || q.contains("बैटरी") || q.contains("सिस्टम")) {
         return@withContext getDeviceStatus(context, language)
     }
 
-    // 13. UNIVERSAL APP LAUNCHER
+    // 11. UNIVERSAL APP LAUNCHER
     if (q.startsWith("open ") || q.startsWith("launch ") || q.contains(" खोल") || q.contains(" खोल्नुहोस्")) {
         val launchMsg = launchAnyApp(context, q, language)
         if (launchMsg != null) return@withContext launchMsg
     }
 
-    // 14. LIVE WEATHER
-    if (q.contains("weather") || q.contains("temperature") || q.contains("मौसम") || q.contains("तापक्रम") || q.contains("गर्मी") || q.contains("पानी पर्छ")) {
+    // 12. LIVE WEATHER (If connected)
+    if (q.contains("weather") || q.contains("temperature") || q.contains("मौसम")) {
         val weatherInfo = fetchLiveWeather(language)
         if (weatherInfo != null) return@withContext weatherInfo
     }
 
-    // 15. WIKIPEDIA
-    if (q.startsWith("who is") || q.startsWith("who was") || q.startsWith("tell me about") || q.contains("wikipedia") || q.contains("विकिपीडिया") || q.contains("को हुन्") || q.contains("बारेमा भन")) {
+    // 13. WIKIPEDIA (If connected)
+    if (q.startsWith("who is") || q.startsWith("who was") || q.startsWith("tell me about") || q.contains("wikipedia")) {
         val wikiTopic = extractWikiTopic(q)
         val wikiAnswer = fetchWikipediaSummary(wikiTopic, language)
         if (wikiAnswer != null) return@withContext wikiAnswer
     }
 
-    // 16. GEMINI MULTI-TURN AI BRAIN
-    if (apiKey.isNotEmpty()) {
-        return@withContext queryGeminiWithMemory(query, apiKey, language)
+    // 14. ON-DEVICE LOCAL LLM (MediaPipe Tasks GenAI - 100% Offline)
+    if (localLlmEngine != null) {
+        try {
+            val localPrompt = "You are JARVIS, a loyal, intelligent personal AI companion for $ownerDisplay. Respond concisely in 1-2 sentences.\nUser: $query\nJARVIS:"
+            val answer = localLlmEngine!!.generateResponse(localPrompt)
+            if (answer.isNotEmpty()) return@withContext answer.trim()
+        } catch (e: Exception) {
+            return@withContext "Snapdragon inference error: ${e.localizedMessage}"
+        }
     }
 
-    return@withContext "Please tap 🔑 KEY and paste a fresh Google key to chat with AI, sir."
+    return@withContext "Offline AI model not loaded yet, $ownerDisplay. Please tap '📥 LOAD MODEL' at the top to select your model file."
 }
 
 // -------------------------------------------------------------
-// MEDIA & HARDWARE HELPERS
+// HARDWARE CONTROLS & HELPERS
 // -------------------------------------------------------------
+fun toggleFlashlight(context: Context, turnOn: Boolean): Boolean {
+    return try {
+        val cm = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val cameraId = cm.cameraIdList.firstOrNull() ?: return false
+        cm.setTorchMode(cameraId, turnOn)
+        true
+    } catch (_: Exception) { false }
+}
+
+fun getDeviceStatus(context: Context, language: AppLanguage): String {
+    val ifilter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+    val batteryStatus = context.registerReceiver(null, ifilter)
+    val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+    val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+    val pct = if (level >= 0 && scale > 0) (level * 100) / scale else 85
+    val status = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+    val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+
+    return "All systems nominal, sir. Your battery is sitting at $pct percent and ${if (isCharging) "charging nicely" else "running on battery"}. Snapdragon neural cores operational."
+}
+
 fun controlMedia(context: Context, keyCode: Int) {
     try {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -878,7 +797,6 @@ fun setSystemAlarm(context: Context, query: String): String? {
             putExtra(AlarmClock.EXTRA_HOUR, hour)
             putExtra(AlarmClock.EXTRA_MINUTES, minute)
             putExtra(AlarmClock.EXTRA_SKIP_UI, true)
-            putExtra(AlarmClock.EXTRA_MESSAGE, "JARVIS Alarm")
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
         }
         context.startActivity(alarmIntent)
@@ -894,33 +812,11 @@ fun setSystemTimer(context: Context, query: String): String? {
         val timerIntent = Intent(AlarmClock.ACTION_SET_TIMER).apply {
             putExtra(AlarmClock.EXTRA_LENGTH, seconds)
             putExtra(AlarmClock.EXTRA_SKIP_UI, true)
-            putExtra(AlarmClock.EXTRA_MESSAGE, "JARVIS Timer")
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
         }
         context.startActivity(timerIntent)
         return "Timer set for $number ${if (query.contains("second")) "seconds" else "minutes"}, sir."
     } catch (_: Exception) { return null }
-}
-
-fun toggleFlashlight(context: Context, turnOn: Boolean): Boolean {
-    return try {
-        val cm = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        val cameraId = cm.cameraIdList.firstOrNull() ?: return false
-        cm.setTorchMode(cameraId, turnOn)
-        true
-    } catch (_: Exception) { false }
-}
-
-fun getDeviceStatus(context: Context, language: AppLanguage): String {
-    val ifilter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
-    val batteryStatus = context.registerReceiver(null, ifilter)
-    val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
-    val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
-    val pct = if (level >= 0 && scale > 0) (level * 100) / scale else 85
-    val status = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
-    val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
-
-    return "All systems nominal, sir. Your battery is at $pct percent and ${if (isCharging) "charging nicely" else "running on battery"}. Neural cores fully active."
 }
 
 fun launchAnyApp(context: Context, query: String, language: AppLanguage): String? {
@@ -953,41 +849,13 @@ fun launchAnyApp(context: Context, query: String, language: AppLanguage): String
 
 fun fetchLiveWeather(language: AppLanguage): String? {
     return try {
-        var lat = 26.72
-        var lon = 85.92
-        var cityName = "Janakpur"
-
-        try {
-            val geoUrl = URL("https://freeipapi.com/api/json")
-            val connGeo = geoUrl.openConnection() as HttpURLConnection
-            connGeo.connectTimeout = 3000
-            if (connGeo.responseCode == 200) {
-                val geoJson = JSONObject(connGeo.inputStream.bufferedReader().use { it.readText() })
-                lat = geoJson.optDouble("latitude", lat)
-                lon = geoJson.optDouble("longitude", lon)
-                cityName = geoJson.optString("cityName", cityName)
-            }
-        } catch (_: Exception) {}
-
-        val weatherUrl = URL("https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon&current=temperature_2m,weather_code")
+        val weatherUrl = URL("https://api.open-meteo.com/v1/forecast?latitude=26.72&longitude=85.92&current=temperature_2m,weather_code")
         val conn = weatherUrl.openConnection() as HttpURLConnection
-        conn.connectTimeout = 4000
+        conn.connectTimeout = 3000
         if (conn.responseCode == 200) {
             val res = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
-            val current = res.getJSONObject("current")
-            val temp = current.getDouble("temperature_2m").toInt()
-            val code = current.getInt("weather_code")
-
-            val condition = when (code) {
-                0 -> "clear skies"
-                1, 2, 3 -> "partly cloudy skies"
-                45, 48 -> "mist and fog"
-                51, 53, 55, 61, 63, 65 -> "rain showers"
-                71, 73, 75 -> "snowfall"
-                95, 96, 99 -> "thunderstorms"
-                else -> "pleasant conditions"
-            }
-            return "In $cityName, it is currently $temp degrees Celsius with $condition, sir."
+            val temp = res.getJSONObject("current").getDouble("temperature_2m").toInt()
+            return "It is currently $temp degrees Celsius outside, sir."
         }
         null
     } catch (_: Exception) { null }
@@ -1006,22 +874,9 @@ fun extractWikiTopic(query: String): String {
 fun fetchWikipediaSummary(topic: String, language: AppLanguage): String? {
     if (topic.isEmpty()) return null
     return try {
-        val encoded = URLEncoder.encode(topic, "UTF-8")
-        val langCode = language.wikiPrefix
-
-        val searchUrl = URL("https://$langCode.wikipedia.org/w/api.php?action=query&list=search&srsearch=$encoded&format=json&utf8=")
-        val connSearch = searchUrl.openConnection() as HttpURLConnection
-        connSearch.connectTimeout = 4000
-        if (connSearch.responseCode != 200) return null
-
-        val searchRes = JSONObject(connSearch.inputStream.bufferedReader().use { it.readText() })
-        val searchList = searchRes.optJSONObject("query")?.optJSONArray("search") ?: return null
-        if (searchList.length() == 0) return null
-        val bestTitle = searchList.getJSONObject(0).getString("title")
-
-        val summaryUrl = URL("https://$langCode.wikipedia.org/api/rest_v1/page/summary/${URLEncoder.encode(bestTitle, "UTF-8")}")
+        val summaryUrl = URL("https://${language.wikiPrefix}.wikipedia.org/api/rest_v1/page/summary/${URLEncoder.encode(topic, "UTF-8")}")
         val connSum = summaryUrl.openConnection() as HttpURLConnection
-        connSum.connectTimeout = 4000
+        connSum.connectTimeout = 3000
         if (connSum.responseCode == 200) {
             val sumRes = JSONObject(connSum.inputStream.bufferedReader().use { it.readText() })
             val extract = sumRes.optString("extract", "")
@@ -1035,148 +890,6 @@ fun fetchWikipediaSummary(topic: String, language: AppLanguage): String? {
     } catch (_: Exception) { null }
 }
 
-// -------------------------------------------------------------
-// BULLETPROOF MULTI-TURN GEMINI BRAIN
-// -------------------------------------------------------------
-suspend fun queryGeminiWithMemory(prompt: String, apiKey: String, language: AppLanguage): String = withContext(Dispatchers.IO) {
-    val cleanKey = apiKey.trim()
-    val systemInstruction = when (language) {
-        AppLanguage.ENGLISH -> "You are JARVIS, a sophisticated personal AI companion with subtle British wit. Speak like a living human companion. Keep answers brief (1 to 2 spoken sentences). Never use markdown or asterisks."
-        AppLanguage.NEPALI -> "तपाईं JARVIS हुनुहुन्छ—एक आत्मीय, बुद्धिमान र विनम्र व्यक्तिगत AI। एक सहयोगी मित्र जस्तै स्वाभाविक र न्यानो भाषामा बोल्नुहोस्। उत्तर १ वा २ वाक्यमा छोटो र प्रष्ट दिनुहोस्। नेपाली देवनागरीमा मात्र लेख्नुहोस्।"
-        AppLanguage.HINDI -> "आप JARVIS हैं—एक समझदार, विनम्र और मित्रवत AI साथी। इंसान की तरह सहज भाव से बात करें। उत्तर 1 या 2 वाक्यों में संक्षिप्त और स्पष्ट दें। हिन्दी देवनागरी में लिखें।"
-    }
-
-    val candidateModels = mutableListOf<String>()
-    if (!activeWorkingModel.isNullOrEmpty()) {
-        candidateModels.add(activeWorkingModel!!)
-    } else {
-        val discovered = fetchAvailableModelsFromGoogle(cleanKey)
-        candidateModels.addAll(discovered)
-        candidateModels.addAll(listOf("gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite"))
-    }
-
-    if (chatHistory.size > 8) {
-        chatHistory.removeAt(0)
-        chatHistory.removeAt(0)
-    }
-
-    var lastError = ""
-
-    for (rawModel in candidateModels.distinct()) {
-        val model = rawModel.removePrefix("models/")
-        try {
-            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                setRequestProperty("x-goog-api-key", cleanKey)
-                doOutput = true
-                connectTimeout = 8000
-                readTimeout = 10000
-            }
-
-            val payload = JSONObject().apply {
-                put("system_instruction", JSONObject().apply {
-                    put("parts", JSONArray().put(JSONObject().put("text", systemInstruction)))
-                })
-
-                val contents = JSONArray()
-                for (turn in chatHistory) {
-                    contents.put(JSONObject().apply {
-                        put("role", turn.first)
-                        put("parts", JSONArray().put(JSONObject().put("text", turn.second)))
-                    })
-                }
-                contents.put(JSONObject().apply {
-                    put("role", "user")
-                    put("parts", JSONArray().put(JSONObject().put("text", prompt)))
-                })
-
-                put("contents", contents)
-                put("generationConfig", JSONObject().apply {
-                    put("maxOutputTokens", 140)
-                    put("temperature", 0.75)
-                })
-            }
-
-            conn.outputStream.use { os ->
-                os.write(payload.toString().toByteArray(Charsets.UTF_8))
-            }
-
-            val code = conn.responseCode
-            if (code == 200) {
-                val resp = conn.inputStream.bufferedReader().use { it.readText() }
-                val root = JSONObject(resp)
-                val candidates = root.optJSONArray("candidates")
-                if (candidates != null && candidates.length() > 0) {
-                    val content = candidates.getJSONObject(0).optJSONObject("content")
-                    val parts = content?.optJSONArray("parts")
-                    if (parts != null && parts.length() > 0) {
-                        val text = parts.getJSONObject(0).optString("text", "")
-                        if (text.isNotEmpty()) {
-                            activeWorkingModel = model
-                            chatHistory.add("user" to prompt)
-                            chatHistory.add("model" to text.trim())
-                            return@withContext text.trim()
-                        }
-                    }
-                }
-            } else {
-                val err = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
-                if (code == 401 || err.contains("API_KEY_INVALID") || err.contains("ACCESS_TOKEN_TYPE_UNSUPPORTED")) {
-                    return@withContext "Google Error [401]: API Key expired. Please tap 🔑 KEY and paste a fresh key from aistudio.google.com, sir."
-                }
-                lastError = "[$code]: ${err.take(80)}"
-            }
-        } catch (e: Exception) {
-            lastError = e.localizedMessage ?: "Timeout"
-        }
-    }
-    return@withContext "Google connection hiccup ($lastError). Please try once more, sir."
-}
-
-fun fetchAvailableModelsFromGoogle(apiKey: String): List<String> {
-    val modelList = mutableListOf<String>()
-    try {
-        val url = URL("https://generativelanguage.googleapis.com/v1beta/models")
-        val conn = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            setRequestProperty("x-goog-api-key", apiKey)
-            connectTimeout = 5000
-            readTimeout = 5000
-        }
-        if (conn.responseCode == 200) {
-            val resp = conn.inputStream.bufferedReader().use { it.readText() }
-            val root = JSONObject(resp)
-            val modelsArray = root.optJSONArray("models")
-            if (modelsArray != null) {
-                for (i in 0 until modelsArray.length()) {
-                    val item = modelsArray.getJSONObject(i)
-                    val name = item.optString("name", "")
-                    val methods = item.optJSONArray("supportedGenerationMethods")
-                    var canGenerate = false
-                    if (methods != null) {
-                        for (j in 0 until methods.length()) {
-                            if (methods.optString(j) == "generateContent") canGenerate = true
-                        }
-                    }
-                    if (canGenerate) {
-                        if (name.contains("flash", ignoreCase = true)) {
-                            modelList.add(0, name)
-                        } else {
-                            modelList.add(name)
-                        }
-                    }
-                }
-            }
-        }
-    } catch (_: Exception) {}
-    return modelList
-}
-
-// -------------------------------------------------------------
-// RESPONSIVE VOICE LISTENER
-// -------------------------------------------------------------
 fun startListeningResponsive(
     context: Context,
     speechRecognizer: SpeechRecognizer,
