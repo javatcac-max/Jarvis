@@ -98,7 +98,7 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 enum class AppLanguage(val label: String, val locale: Locale, val tag: String, val wikiPrefix: String) {
-    ENGLISH("EN", Locale.US, "en-US", "en"),
+    ENGLISH("EN", Locale.UK, "en-GB", "en"), // Matches Nothing Phone (2) UK offline speech pack!
     NEPALI("नेपा", Locale("ne", "NP"), "ne-NP", "ne"),
     HINDI("हिन्द", Locale("hi", "IN"), "hi-IN", "hi")
 }
@@ -111,7 +111,6 @@ class JarvisAccessibilityService : AccessibilityService() {
         var instance: JarvisAccessibilityService? = null
         fun isEnabled(): Boolean = instance != null
 
-        // 1. PHYSICAL SWIPE FOR FEEDS & REELS (TikTok, Shorts, Reels, Facebook)
         fun swipeScreen(isNext: Boolean): Boolean {
             val s = instance ?: return false
             val metrics = s.resources.displayMetrics
@@ -135,7 +134,6 @@ class JarvisAccessibilityService : AccessibilityService() {
             return s.dispatchGesture(gesture, null, null)
         }
 
-        // 2. AUTO-CLICK ANY TEXT ON SCREEN
         fun clickOnScreen(targetText: String): Boolean {
             val root = instance?.rootInActiveWindow ?: return false
             val nodes = root.findAccessibilityNodeInfosByText(targetText)
@@ -156,7 +154,6 @@ class JarvisAccessibilityService : AccessibilityService() {
             return false
         }
 
-        // 3. AUTO-TYPE INTO CURRENTLY FOCUSED INPUT BOX
         fun typeIntoFocusedBox(text: String): Boolean {
             val root = instance?.rootInActiveWindow ?: return false
             val focusedNode = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
@@ -752,7 +749,7 @@ suspend fun processEverythingMaster(
         }
     }
 
-    // 5. AUTO-TYPE INTO FOCUSED INPUT BOX (Type without touching keyboard!)
+    // 5. AUTO-TYPE INTO FOCUSED INPUT BOX
     if (q.startsWith("type ") || q.startsWith("write ") || q.startsWith("लेख ")) {
         val textToType = q.removePrefix("type ").removePrefix("write ").removePrefix("लेख ").trim()
         val typed = JarvisAccessibilityService.typeIntoFocusedBox(textToType)
@@ -1026,6 +1023,9 @@ fun launchAnyApp(context: Context, query: String, language: AppLanguage): String
     return null
 }
 
+// -------------------------------------------------------------
+// RESPONSIVE VOICE LISTENER (OFFLINE & REAL-TIME ERROR DIAGNOSTICS)
+// -------------------------------------------------------------
 fun startListeningResponsive(
     context: Context,
     speechRecognizer: SpeechRecognizer,
@@ -1050,13 +1050,11 @@ fun startListeningResponsive(
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
         putExtra(RecognizerIntent.EXTRA_LANGUAGE, language.tag)
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, language.tag)
-        putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, language.tag)
         putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-        // OFFLINE PREFERENCE (Works in Airplane mode)
         putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
         putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 10000L)
-        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1800L)
-        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1800L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
     }
 
     speechRecognizer.setRecognitionListener(object : RecognitionListener {
@@ -1071,11 +1069,17 @@ fun startListeningResponsive(
 
         override fun onError(error: Int) {
             try { am?.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_UNMUTE, 0) } catch (_: Exception) {}
+
+            // REAL ERROR DIAGNOSTICS (No more silent drops to Standby!)
             val message = when (error) {
+                SpeechRecognizer.ERROR_AUDIO -> "Mic is busy! Stop Screen Recorder or other mic app."
+                SpeechRecognizer.ERROR_CLIENT -> "Speech client busy. Tap orb to try again."
+                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission required."
+                SpeechRecognizer.ERROR_NETWORK -> "Network error or English (UK) offline pack needed."
                 SpeechRecognizer.ERROR_NO_MATCH -> "Didn't hear clearly. Tap orb."
-                SpeechRecognizer.ERROR_NETWORK -> "Offline voice recognition pack needed in Settings."
-                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Listening paused. Tap orb."
-                else -> "Standby. Tap orb to speak."
+                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Mic is currently busy."
+                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Listening timed out. Tap orb."
+                else -> "Audio error code ($error). Tap orb."
             }
             onError(message)
             onStateChange(false)
