@@ -13,9 +13,12 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 1
-        versionName = "1.0.0"
+        versionName = "2.0.0-offline"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     buildTypes {
@@ -37,6 +40,11 @@ android {
     buildFeatures {
         compose = true
     }
+    packaging {
+        jniLibs {
+            pickFirsts += "**/libc++_shared.so"
+        }
+    }
 }
 
 dependencies {
@@ -49,4 +57,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+
+    // Google MediaPipe On-Device Offline LLM Engine
+    implementation("com.google.mediapipe:tasks-genai:0.10.14")
 }
